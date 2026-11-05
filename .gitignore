@@ -1,0 +1,15 @@
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+build/
+*.ipa
+*.dSYM.zip
+*.p8
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/test_output/
+fastlane/README.md
+.DS_Store
+vendor/
+.bundle/
+App/Info.plist

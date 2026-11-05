@@ -1,0 +1,51 @@
+# 只在 CI（GitHub Actions macOS runner）里跑。所需环境变量由 .github/workflows/testflight.yml 注入：
+#   APP_NAME BUNDLE_ID APPLE_TEAM_ID ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_PATH BUILD_NUMBER
+# 签名走 Xcode 自动签名 + App Store Connect API Key（云端托管证书），不需要 match / 证书仓库。
+default_platform(:ios)
+
+platform :ios do
+  desc "Archive → 签名 → 上传 TestFlight"
+  lane :beta do
+    %w[APP_NAME BUNDLE_ID APPLE_TEAM_ID ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_PATH BUILD_NUMBER].each do |k|
+      UI.user_error!("缺少环境变量 #{k}") if ENV[k].to_s.empty?
+    end
+
+    api_key = app_store_connect_api_key(
+      key_id: ENV["ASC_KEY_ID"],
+      issuer_id: ENV["ASC_ISSUER_ID"],
+      key_filepath: ENV["ASC_KEY_PATH"],
+      in_house: false
+    )
+
+    auth = [
+      "-allowProvisioningUpdates",
+      "-authenticationKeyPath #{ENV['ASC_KEY_PATH']}",
+      "-authenticationKeyID #{ENV['ASC_KEY_ID']}",
+      "-authenticationKeyIssuerID #{ENV['ASC_ISSUER_ID']}"
+    ].join(" ")
+
+    build_app(
+      project: "#{ENV['APP_NAME']}.xcodeproj",
+      scheme: "App",
+      configuration: "Release",
+      clean: true,
+      output_directory: "build",
+      output_name: "#{ENV['APP_NAME']}.ipa",
+      export_method: "app-store",
+      xcargs: "CURRENT_PROJECT_VERSION=#{ENV['BUILD_NUMBER']} #{auth}",
+      export_xcargs: auth,
+      export_options: {
+        signingStyle: "automatic",
+        teamID: ENV["APPLE_TEAM_ID"],
+        manageAppVersionAndBuildNumber: false
+      }
+    )
+
+    upload_to_testflight(
+      api_key: api_key,
+      app_identifier: ENV["BUNDLE_ID"],
+      skip_waiting_for_build_processing: true, # 不在 runner 上干等苹果处理（省 macOS 分钟数）
+      distribute_external: false
+    )
+  end
+end
