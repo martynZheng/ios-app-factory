@@ -1,14 +1,72 @@
 # 只在 CI（GitHub Actions macOS runner）里跑。所需环境变量由 .github/workflows/testflight.yml 注入：
 #   APP_NAME BUNDLE_ID APPLE_TEAM_ID ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_PATH BUILD_NUMBER
-# 签名走 Xcode 自动签名 + App Store Connect API Key（云端托管证书），不需要 match / 证书仓库。
+#
+# 签名策略（不需要证书仓库，也不需要注册测试设备）：
+#   1. archive 时完全不签名（CODE_SIGNING_ALLOWED=NO）——否则自动签名会先要 Development 描述文件，
+#      账号下没有设备时报 "Your team has no devices"。
+#   2. exportArchive 时用 App Store Connect API Key + -allowProvisioningUpdates 走苹果云端签名，
+#      自动创建/复用云端分发证书和 App Store 描述文件。API Key 必须是 Admin 权限。
 default_platform(:ios)
 
 platform :ios do
-  desc "Archive → 签名 → 上传 TestFlight"
+  desc "Archive（不签名）→ 云端分发签名导出 → 上传 TestFlight"
   lane :beta do
     %w[APP_NAME BUNDLE_ID APPLE_TEAM_ID ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_PATH BUILD_NUMBER].each do |k|
       UI.user_error!("缺少环境变量 #{k}") if ENV[k].to_s.empty?
     end
+
+    root = File.expand_path("..", __dir__)
+    build_dir = File.join(root, "build")
+    archive = File.join(build_dir, "App.xcarchive")
+    export_dir = File.join(build_dir, "export")
+    FileUtils.rm_rf(build_dir)
+    FileUtils.mkdir_p(export_dir)
+
+    auth = [
+      "-allowProvisioningUpdates",
+      "-authenticationKeyPath", ENV["ASC_KEY_PATH"],
+      "-authenticationKeyID", ENV["ASC_KEY_ID"],
+      "-authenticationKeyIssuerID", ENV["ASC_ISSUER_ID"]
+    ].map { |a| a.shellescape }.join(" ")
+
+    sh(%W[
+      set -o pipefail && cd #{root.shellescape} && xcodebuild archive
+      -project #{"#{ENV['APP_NAME']}.xcodeproj".shellescape}
+      -scheme App -configuration Release
+      -destination generic/platform=iOS
+      -archivePath #{archive.shellescape}
+      CURRENT_PROJECT_VERSION=#{ENV['BUILD_NUMBER']}
+      CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=
+      | xcbeautify
+    ].join(" "))
+
+    export_options = File.join(build_dir, "ExportOptions.plist")
+    File.write(export_options, <<~PLIST)
+      <?xml version="1.0" encoding="UTF-8"?>
+      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      <plist version="1.0">
+      <dict>
+        <key>method</key><string>app-store-connect</string>
+        <key>destination</key><string>export</string>
+        <key>signingStyle</key><string>automatic</string>
+        <key>teamID</key><string>#{ENV['APPLE_TEAM_ID']}</string>
+        <key>manageAppVersionAndBuildNumber</key><false/>
+        <key>uploadSymbols</key><true/>
+      </dict>
+      </plist>
+    PLIST
+
+    sh(%W[
+      set -o pipefail && xcodebuild -exportArchive
+      -archivePath #{archive.shellescape}
+      -exportPath #{export_dir.shellescape}
+      -exportOptionsPlist #{export_options.shellescape}
+      #{auth}
+      | xcbeautify
+    ].join(" "))
+
+    ipa = Dir[File.join(export_dir, "*.ipa")].first
+    UI.user_error!("导出后没找到 .ipa") unless ipa
 
     api_key = app_store_connect_api_key(
       key_id: ENV["ASC_KEY_ID"],
@@ -17,32 +75,9 @@ platform :ios do
       in_house: false
     )
 
-    auth = [
-      "-allowProvisioningUpdates",
-      "-authenticationKeyPath #{ENV['ASC_KEY_PATH']}",
-      "-authenticationKeyID #{ENV['ASC_KEY_ID']}",
-      "-authenticationKeyIssuerID #{ENV['ASC_ISSUER_ID']}"
-    ].join(" ")
-
-    build_app(
-      project: "#{ENV['APP_NAME']}.xcodeproj",
-      scheme: "App",
-      configuration: "Release",
-      clean: true,
-      output_directory: "build",
-      output_name: "#{ENV['APP_NAME']}.ipa",
-      export_method: "app-store",
-      xcargs: "CURRENT_PROJECT_VERSION=#{ENV['BUILD_NUMBER']} #{auth}",
-      export_xcargs: auth,
-      export_options: {
-        signingStyle: "automatic",
-        teamID: ENV["APPLE_TEAM_ID"],
-        manageAppVersionAndBuildNumber: false
-      }
-    )
-
     upload_to_testflight(
       api_key: api_key,
+      ipa: ipa,
       app_identifier: ENV["BUNDLE_ID"],
       skip_waiting_for_build_processing: true, # 不在 runner 上干等苹果处理（省 macOS 分钟数）
       distribute_external: false

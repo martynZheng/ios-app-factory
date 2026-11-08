@@ -84,6 +84,7 @@ jobs:
         with:
           name: build-logs
           path: |
+            build/**/*.log
             ~/Library/Logs/gym/
             fastlane/report.xml
           if-no-files-found: ignore

@@ -39,11 +39,6 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
-      configs:
-        # Release 直接用分发证书签名：App Store 描述文件不需要注册测试设备
-        # （否则自动签名会先要 Development 描述文件，报 "Your team has no devices"）
-        Release:
-          CODE_SIGN_IDENTITY: "Apple Distribution"
 schemes:
   App:
     build:
