@@ -26,10 +26,18 @@ targets:
         CFBundleDisplayName: ${DISPLAY_NAME}
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        UILaunchScreen: {}
+        UILaunchScreen:
+          UIColorName: LaunchBackground
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
-        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        # iPhone Duo 内屏展开后天然是横向，外屏竖向；相机界面随握持方向旋转
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIStatusBarHidden: true
+        NSCameraUsageDescription: 银盐需要使用相机来拍摄胶片风格的照片。
+        NSPhotoLibraryAddUsageDescription: 银盐会把冲洗好的照片保存到你的相册。
         ITSAppUsesNonExemptEncryption: false   # 免去每次上传的出口合规问答
         LSRequiresIPhoneOS: true
     settings:

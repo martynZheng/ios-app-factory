@@ -12,7 +12,8 @@ concurrency:
 
 jobs:
   testflight:
-    runs-on: macos-26
+    # Xcode 27.1 SDK 才能让 App 在 iPhone Duo 内屏铺满全屏（旧 SDK 会以兼容尺寸显示）
+    runs-on: xcode-27
     timeout-minutes: 45
     env:
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -51,8 +52,11 @@ jobs:
           fi
           echo "ASC_KEY_PATH=$key" >> "$GITHUB_ENV"
 
-      - name: Xcode version
-        run: xcodebuild -version
+      - name: Select Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          if [ -d /Applications/Xcode_27.1.app ]; then sudo xcode-select -s /Applications/Xcode_27.1.app; fi
+          xcodebuild -version
 
       - name: Generate Xcode project
         run: |

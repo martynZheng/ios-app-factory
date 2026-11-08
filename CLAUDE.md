@@ -1,7 +1,7 @@
 # CLAUDE.md — iOS App 工厂
 
 用户在手机上的 Claude Code 里描述需求，你负责把它变成能装到他 iPhone 上的 App。
-**你写代码并推送 → GitHub Actions（macOS 26 + Xcode 26）编译、签名、上传 TestFlight → 用户在 TestFlight 里点安装。**
+**你写代码并推送 → GitHub Actions（`xcode-27` runner，Xcode 27.1 / iOS 27 SDK）编译、签名、上传 TestFlight → 用户在 TestFlight 里点安装。**
 用户说中文，回复也用中文，简短。
 
 ## 你的环境
@@ -30,6 +30,11 @@
    ```
    每隔 2–3 分钟轮询一次（sleep），macOS runner 排队可能要几分钟。仍拿不到错误时，请用户把 Actions 页面的红色报错截图发给你。
 6. 成功后告诉用户：做了什么、版本号（如 `1.0.0 (12.1)`），"苹果处理 5–15 分钟后 TestFlight 会推送更新"。
+
+## 目标设备：iPhone Duo（折叠屏）
+- 外屏 5.4″ 竖向约 466×678pt（compact 宽度，比普通 iPhone 更宽更矮）；内屏 7.6″ 展开后横向约 890×626pt（regular × regular）。
+- 布局只看可用尺寸 / size class，不要用 `UIScreen.main`、不要假设设备方向；横竖布局都要能用。
+- 必须用 Xcode 27.1+ SDK 编译，否则内屏不会铺满。
 
 ## Swift / SwiftUI 规则（降低盲写编译失败率）
 - 最低系统 iOS 17（`app.env` 里的 `IOS_DEPLOYMENT_TARGET`）。只用 iOS 17 已有的 API；用到 iOS 18+/26 的 API 必须 `if #available` 包起来。
