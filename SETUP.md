@@ -13,7 +13,7 @@ developer.apple.com → **Certificates, IDs & Profiles** → **Identifiers** →
 ```
 com.deffisoan.appfactory
 ```
-（必须和仓库 `app.env` 里的 `BUNDLE_ID` 一致）→ Continue → Register。
+（必须和仓库 `apps/<name>/app.env` 里的 `BUNDLE_ID` 一致）→ Continue → Register。
 
 ## 3. 在 App Store Connect 建 App
 https://appstoreconnect.apple.com → **App** → **+ 新建 App**

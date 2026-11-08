@@ -1,5 +1,5 @@
 # 只在 CI（GitHub Actions macOS runner）里跑。所需环境变量由 .github/workflows/testflight.yml 注入：
-#   APP_NAME BUNDLE_ID APPLE_TEAM_ID ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_PATH BUILD_NUMBER
+#   APP_DIR APP_NAME BUNDLE_ID APPLE_TEAM_ID ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_PATH BUILD_NUMBER
 #
 # 签名策略（不需要证书仓库，也不需要注册测试设备）：
 #   1. archive 时完全不签名（CODE_SIGNING_ALLOWED=NO）——否则自动签名会先要 Development 描述文件，
@@ -11,11 +11,11 @@ default_platform(:ios)
 platform :ios do
   desc "Archive（不签名）→ 云端分发签名导出 → 上传 TestFlight"
   lane :beta do
-    %w[APP_NAME BUNDLE_ID APPLE_TEAM_ID ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_PATH BUILD_NUMBER].each do |k|
+    %w[APP_DIR APP_NAME BUNDLE_ID APPLE_TEAM_ID ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_PATH BUILD_NUMBER].each do |k|
       UI.user_error!("缺少环境变量 #{k}") if ENV[k].to_s.empty?
     end
 
-    root = File.expand_path("..", __dir__)
+    root = File.expand_path(File.join("..", ENV["APP_DIR"]), __dir__)
     build_dir = File.join(root, "build")
     archive = File.join(build_dir, "App.xcarchive")
     export_dir = File.join(build_dir, "export")

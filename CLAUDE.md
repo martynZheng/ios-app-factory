@@ -8,10 +8,16 @@
 - 你跑在 Linux 上，**没有 Xcode、没有 Swift 编译器、没有模拟器**。唯一的编译器是 CI。
 - 所以：写保守、确定能编过的 Swift；推送后必须盯 CI 结果（见下方闭环），不能推完就说"做好了"。
 
+## 仓库里有多个 App
+每个 App 一个目录：`apps/<name>/`（`app.env`、`project.yml`、`App/Sources`、`App/Resources`）。
+- `apps/argent` —— 银盐（胶片相机）
+- `apps/starmall` —— 星光百货（女性向放置经营游戏）
+push 时 CI 只构建改动过的 App（改了 `fastlane/`、`.github/` 则全部构建）。先确认用户说的是哪个 App，只改那个目录。
+
 ## 每个需求的标准流程
 1. 读懂需求。只有在需求真的有歧义、且猜错代价大时才问一个问题；否则按最合理的理解直接做，并在回复里说明你的理解。
-2. 在 `App/Sources/` 里实现（可以整个替换占位的 `ContentView.swift`，可以建子目录，XcodeGen 会自动收录）。
-3. 如果改了 App 名字/图标/权限等，同步改 `app.env` / `project.yml` / `App/Resources/`。
+2. 在 `apps/<name>/App/Sources/` 里实现（可以建子目录，XcodeGen 会自动收录）。
+3. 如果改了 App 名字/图标/权限等，同步改该 App 目录下的 `app.env` / `project.yml` / `App/Resources/`。
 4. commit 并 push（当前分支即可，`main` 和 `claude/**` 分支都会触发上传）。
 5. **CI 闭环**（必须做）：
    ```bash
@@ -23,8 +29,8 @@
    如果 `gh` 不可用（云端会话里 GH_TOKEN 无效，且代理拦截写类 Actions API）：仓库是公开的，可以不带认证直接读：
    ```bash
    R=martynZheng/ios-app-factory; SHA=$(git rev-parse HEAD)
-   # 状态（check-run id 就是 job id）；status=queued/in_progress/completed，conclusion=success/failure
-   curl -sS https://api.github.com/repos/$R/commits/$SHA/check-runs | python3 -c "import json,sys;[print(c['id'],c['status'],c['conclusion']) for c in json.load(sys.stdin)['check_runs']]"
+   # 状态（check-run id 就是 job id；会有 detect 和 testflight (<app>) 几个 job）；status=queued/in_progress/completed，conclusion=success/failure
+   curl -sS https://api.github.com/repos/$R/commits/$SHA/check-runs | python3 -c "import json,sys;[print(c['id'],c['name'],c['status'],c['conclusion']) for c in json.load(sys.stdin)['check_runs']]"
    # 失败时拉完整日志找错误
    curl -sSL https://api.github.com/repos/$R/actions/jobs/<job_id>/logs | grep -nE "error:|❌|\[!\]" | head -40
    ```
@@ -56,19 +62,19 @@
 - `fastlane/` 和 `.github/workflows/` 只在流水线本身坏了时才改。
 - 只改 `MARKETING_VERSION` 当用户要求"发新版本号"；构建号由 CI 自动生成（`run_number.run_attempt`），不要手动改。
 
-## 换一个全新的 App
-`BUNDLE_ID` 是 App 的身份。用户想做"另一个 App"而不是改当前这个时：
-1. 让用户先完成：developer.apple.com 注册新 Identifier → App Store Connect 用它新建 App → 把自己加进内部测试组（见 SETUP.md 第 2、5 步）。
-2. 然后改 `app.env` 里的 `APP_NAME` / `DISPLAY_NAME` / `BUNDLE_ID`，必要时把 `MARKETING_VERSION` 重置为 `1.0.0`。
-更干净的做法是用户 fork/复制这个仓库，一个仓库一个 App。
+## 新建一个 App
+1. 让用户先在苹果后台完成：developer.apple.com 注册新 Bundle ID（Explicit）→ App Store Connect 用它新建 App →
+   该 App 的 TestFlight 建内部测试组、勾「自动分发」、把自己加进去。GitHub 那边不需要任何操作（Secrets 共用）。
+2. 复制一个现有 App 目录到 `apps/<新名字>/`，改 `app.env` 的 `APP_NAME` / `DISPLAY_NAME` / `BUNDLE_ID`，
+   `MARKETING_VERSION` 重置为 `1.0.0`，按需改 `project.yml` 的 Info.plist 键（权限说明等），替换图标和源码。
 
 ## 仓库结构
 ```
-app.env                      App 名称 / Bundle ID / 版本 / 最低系统（单一事实来源）
-project.yml                  XcodeGen 工程描述
-App/Sources/                 Swift 代码
-App/Resources/Assets.xcassets 图标（1024×1024 无透明 PNG）、主题色
-fastlane/Fastfile            archive → 签名 → 上传 TestFlight
-.github/workflows/testflight.yml  CI
+apps/<name>/app.env          App 名称 / Bundle ID / 版本 / 最低系统（单一事实来源）
+apps/<name>/project.yml      XcodeGen 工程描述
+apps/<name>/App/Sources/     Swift 代码
+apps/<name>/App/Resources/   图标（1024×1024 无透明 PNG）、主题色
+fastlane/Fastfile            archive（不签名）→ 云端分发签名导出 → 上传 TestFlight（所有 App 共用）
+.github/workflows/testflight.yml  CI：detect 改动的 App → 矩阵构建
 SETUP.md                     用户一次性配置步骤
 ```
