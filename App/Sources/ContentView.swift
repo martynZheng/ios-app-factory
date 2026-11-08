@@ -17,7 +17,7 @@ struct ContentView: View {
                 Image(systemName: "bolt.fill")
                     .font(.system(size: 64))
                     .foregroundStyle(.tint)
-                Text("流水线已跑通")
+                Text("流水线已跑通 🎉")
                     .font(.title.bold())
                 Text("在手机上的 Claude Code 里说出需求，\n这里就会变成你要的 App。")
                     .multilineTextAlignment(.center)
