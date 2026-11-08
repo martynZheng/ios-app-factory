@@ -27,6 +27,10 @@ final class FilmProcessor {
             out = addHalation(out, amount: CGFloat(look.halation), extent: extent)
         }
 
+        if look.glow > 0.01 {
+            out = addGlow(out, amount: CGFloat(look.glow), extent: extent)
+        }
+
         let grain = look.grain * grainScale
         if grain > 0.01 {
             out = addGrain(out, amount: CGFloat(grain), size: CGFloat(look.grainSize), extent: extent, seed: seed)
@@ -42,6 +46,37 @@ final class FilmProcessor {
         }
 
         return out.cropped(to: extent)
+    }
+
+    // MARK: - 肤色蒙版（人像磨皮用）
+
+    private lazy var skinCube: Data = {
+        let n = cubeSize
+        var values = [Float](repeating: 0, count: n * n * n * 4)
+        let denom = Float(n - 1)
+        var i = 0
+        for b in 0..<n {
+            for g in 0..<n {
+                for r in 0..<n {
+                    let w = Self.skinWeight(SIMD3<Float>(Float(r) / denom, Float(g) / denom, Float(b) / denom))
+                    values[i] = w; values[i + 1] = w; values[i + 2] = w; values[i + 3] = 1
+                    i += 4
+                }
+            }
+        }
+        return values.withUnsafeBufferPointer { Data(buffer: $0) }
+    }()
+
+    /// 灰度蒙版：越像肤色越白。
+    func skinMask(_ image: CIImage) -> CIImage {
+        lock.lock()
+        let data = skinCube
+        lock.unlock()
+        return image.applyingFilter("CIColorCubeWithColorSpace", parameters: [
+            "inputCubeDimension": cubeSize,
+            "inputCubeData": data,
+            "inputColorSpace": lutSpace,
+        ])
     }
 
     // MARK: - LUT
@@ -101,6 +136,60 @@ final class FilmProcessor {
         return y
     }
 
+    private static func smoothstep(_ e0: Float, _ e1: Float, _ x: Float) -> Float {
+        let t = clamp01((x - e0) / (e1 - e0))
+        return t * t * (3 - 2 * t)
+    }
+
+    /// 肤色区域权重：色相落在红橙（约 0°–45°）、中等饱和、不太暗的颜色。
+    static func skinWeight(_ c: SIMD3<Float>) -> Float {
+        let maxC = max(c.x, max(c.y, c.z))
+        let minC = min(c.x, min(c.y, c.z))
+        let delta = maxC - minC
+        guard maxC > 0.18, delta > 0.02 else { return 0 }
+        let sat = delta / maxC
+        var hue: Float
+        if maxC == c.x {
+            hue = (c.y - c.z) / delta
+        } else if maxC == c.y {
+            hue = 2 + (c.z - c.x) / delta
+        } else {
+            hue = 4 + (c.x - c.y) / delta
+        }
+        hue /= 6
+        if hue < 0 { hue += 1 }
+        // 色相：0.0~0.13 之间（红到橙黄），两端柔和过渡；略带品红（>0.95）也算
+        let hueW: Float
+        if hue > 0.95 {
+            hueW = smoothstep(0.95, 0.99, hue)
+        } else {
+            hueW = smoothstep(-0.02, 0.02, hue) * (1 - smoothstep(0.10, 0.15, hue))
+        }
+        let satW = smoothstep(0.08, 0.18, sat) * (1 - smoothstep(0.62, 0.78, sat))
+        let valW = smoothstep(0.18, 0.35, maxC)
+        return hueW * satW * valW
+    }
+
+    private static func adjustSkin(_ input: SIMD3<Float>, _ look: FilmLook) -> SIMD3<Float> {
+        let w = skinWeight(input)
+        guard w > 0.001 else { return input }
+        var c = input
+        // 提亮：向白色方向推中间调，保留高光
+        let lift = look.skinBrighten * w * 0.35
+        c += (SIMD3<Float>(repeating: 1) - c) * lift * c
+        // 气色：微微加红、减绿
+        let rosy = look.skinRosy * w
+        c.x += 0.035 * rosy
+        c.y -= 0.012 * rosy
+        c.z += 0.012 * rosy
+        // 通透：去黄（加蓝）并略降饱和
+        let clear = look.skinClear * w
+        c.z += 0.03 * clear
+        let l = luma(c)
+        c = SIMD3<Float>(repeating: l) + (c - SIMD3<Float>(repeating: l)) * (1 - 0.22 * clear)
+        return clamp01(c)
+    }
+
     private static func keyed(_ x: Float, _ key: Float) -> Float {
         clamp01(x + key * 2 * x * (1 - x))
     }
@@ -144,6 +233,10 @@ final class FilmProcessor {
             c = SIMD3<Float>(keyed(c.x, look.key), keyed(c.y, look.key), keyed(c.z, look.key))
         }
 
+        if look.skinBrighten != 0 || look.skinRosy != 0 || look.skinClear != 0 {
+            c = adjustSkin(c, look)
+        }
+
         c = SIMD3<Float>(curve(c.x, look.contrast), curve(c.y, look.contrast), curve(c.z, look.contrast))
         c = SIMD3<Float>(repeating: blacks) + c * range
 
@@ -185,6 +278,23 @@ final class FilmProcessor {
             .clampedToExtent()
             .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
             .cropped(to: extent)
+        return glow.applyingFilter("CIScreenBlendMode", parameters: [kCIInputBackgroundImageKey: image])
+    }
+
+    /// 柔光：整幅画面大半径模糊后以较低强度滤色叠回，亮部泛起柔和光晕（≈ 黑柔滤镜 / 甜水感）。
+    private func addGlow(_ image: CIImage, amount: CGFloat, extent: CGRect) -> CIImage {
+        let radius = max(2, extent.width * 0.014)
+        let k = min(amount, 1) * 0.55
+        let glow = image
+            .clampedToExtent()
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
+            .cropped(to: extent)
+            .applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: k, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: k, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: k, w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+            ])
         return glow.applyingFilter("CIScreenBlendMode", parameters: [kCIInputBackgroundImageKey: image])
     }
 

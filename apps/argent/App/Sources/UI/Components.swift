@@ -307,6 +307,8 @@ struct ExposureScale: View {
 final class LevelMotion: ObservableObject {
     @Published var tilt: Double = 0
     @Published var isFlat = false
+    /// 手机明显俯拍（镜头朝下）
+    @Published var lookingDown = false
     private let manager = CMMotionManager()
 
     func start() {
@@ -315,6 +317,9 @@ final class LevelMotion: ObservableObject {
         manager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
             guard let self, let g = motion?.gravity else { return }
             self.isFlat = abs(g.z) > 0.85
+            // 竖着/横着拿手机时，屏幕越朝上 g.z 越接近 -1；镜头朝下超过约 12° 视为俯拍
+            let down = g.z < -0.21 && !self.isFlat
+            if down != self.lookingDown { self.lookingDown = down }
             let angle = atan2(g.x, -g.y) * 180 / .pi
             let residual = angle - (angle / 90).rounded() * 90
             self.tilt = self.tilt * 0.75 + residual * 0.25

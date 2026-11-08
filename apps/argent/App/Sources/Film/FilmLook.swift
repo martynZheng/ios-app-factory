@@ -15,6 +15,10 @@ struct FilmLook: Identifiable, Equatable {
     enum Family: String, CaseIterable {
         case ricoh = "理光 GR"
         case fuji = "富士"
+        case portrait = "人像"
+
+        /// 胶片模式里可选的系列
+        static let film: [Family] = [.ricoh, .fuji]
     }
 
     let id: String
@@ -44,6 +48,12 @@ struct FilmLook: Identifiable, Equatable {
     var grainSize: Float = 1         // 颗粒大小倍数
     var halation: Float = 0          // 高光红晕
     var vignette: Float = 0.2        // 暗角（≈ 理光 Shading）
+    var glow: Float = 0              // 柔光/朦胧（甜水感、黑柔滤镜效果）
+
+    // 肤色（只作用于肤色色相区域）
+    var skinBrighten: Float = 0      // 提亮肤色
+    var skinRosy: Float = 0          // 加一点粉嫩气色
+    var skinClear: Float = 0         // 去黄、更通透（冷白皮方向）
 
     func tuned(_ change: (inout FilmLook) -> Void) -> FilmLook {
         var copy = self
@@ -250,6 +260,20 @@ struct ViewfinderGeometry {
         let w = p.width * s
         let h = p.height * s
         return CGRect(x: (viewSize.width - w) / 2, y: (viewSize.height - h) / 2, width: w, height: h)
+    }
+
+    /// 相机帧内的归一化坐标 → 视图上的点。
+    func viewPoint(fromNormalized p: CGPoint) -> CGPoint {
+        let s = scale
+        let c = cropInFrame
+        return CGPoint(x: (p.x * frameSize.width - c.midX) * s + viewSize.width / 2,
+                       y: (p.y * frameSize.height - c.midY) * s + viewSize.height / 2)
+    }
+
+    func viewRect(fromNormalized r: CGRect) -> CGRect {
+        let a = viewPoint(fromNormalized: r.origin)
+        let b = viewPoint(fromNormalized: CGPoint(x: r.maxX, y: r.maxY))
+        return CGRect(x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y)
     }
 
     /// 视图上的点 → 相机帧内的归一化坐标（左上为原点）。

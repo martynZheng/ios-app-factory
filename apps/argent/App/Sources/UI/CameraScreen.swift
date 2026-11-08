@@ -6,6 +6,7 @@ import SwiftUI
 struct CameraScreen: View {
     @StateObject private var camera = CameraModel()
     @StateObject private var level = LevelMotion()
+    @StateObject private var director = PortraitDirector()
 
     @AppStorage("look") private var lookID = FilmLook.all[0].id
     @AppStorage("aspect") private var aspectRaw = AspectRatio.r3x2.rawValue
@@ -16,6 +17,12 @@ struct CameraScreen: View {
     @AppStorage("watermarkOn") private var watermarkOn = false
     @AppStorage("watermarkText") private var watermarkText = "Photographed by Claude"
     @AppStorage("hintSeen") private var hintSeen = false
+    @AppStorage("mode") private var modeRaw = "film"
+    @AppStorage("skinTone") private var skinRaw = SkinTone.smart.rawValue
+    @AppStorage("beauty") private var beautyRaw = BeautyLevel.light.rawValue
+    @AppStorage("poseTips") private var showPoses = true
+    @AppStorage("portraitGuide") private var showGuide = true
+    @AppStorage("portraitTemplate") private var templateChoice = "auto"
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -30,7 +37,15 @@ struct CameraScreen: View {
     @State private var showEV = false
     @State private var shotCount = 0
 
-    private var look: FilmLook { FilmLook.find(lookID) }
+    private var filmLook: FilmLook { FilmLook.find(lookID) }
+    private var isPortrait: Bool { modeRaw == "portrait" }
+    private var skin: SkinTone { SkinTone(rawValue: skinRaw) ?? .smart }
+    private var beauty: BeautyLevel { BeautyLevel(rawValue: beautyRaw) ?? .light }
+    /// 当前生效的色彩：胶片模式用所选胶片，人像模式用模板 + 肤色
+    private var look: FilmLook {
+        isPortrait ? director.template.look(skin: skin, sample: director.analysis.faceSample) : filmLook
+    }
+    private var effectiveGrain: Float { isPortrait ? 1 : grain.scale }
     private var aspect: AspectRatio { AspectRatio(rawValue: aspectRaw) ?? .r3x2 }
     private var grain: GrainLevel { GrainLevel(rawValue: grainRaw) ?? .standard }
     private var activeWatermark: String? {
@@ -39,6 +54,15 @@ struct CameraScreen: View {
     }
 
     var body: some View {
+        portraitHooks(lifecycleHooks(content))
+            .alert("提示", isPresented: Binding(get: { camera.message != nil }, set: { if !$0 { camera.message = nil } })) {
+                Button("好", role: .cancel) { camera.message = nil }
+            } message: {
+                Text(camera.message ?? "")
+            }
+    }
+
+    private var content: some View {
         ZStack {
             Theme.ink.ignoresSafeArea()
             viewfinderLayer
@@ -55,27 +79,48 @@ struct CameraScreen: View {
         .modifier(HardwareShutter { shoot() })
         .sensoryFeedback(.selection, trigger: lookID)
         .sensoryFeedback(.impact(weight: .medium), trigger: shotCount)
-        .onAppear {
-            camera.start()
-            level.start()
-        }
-        .onChange(of: scenePhase) { _, phase in
-            switch phase {
-            case .active:
+    }
+
+    private func lifecycleHooks<V: View>(_ view: V) -> some View {
+        view
+            .onAppear {
                 camera.start()
                 level.start()
-            case .background:
-                camera.stop()
-                level.stop()
-            default:
-                break
+                director.camera = camera
+                director.aspect = aspect
+                director.manualTemplateID = templateChoice == "auto" ? nil : templateChoice
+                if isPortrait { enterPortrait() }
             }
-        }
-        .alert("提示", isPresented: Binding(get: { camera.message != nil }, set: { if !$0 { camera.message = nil } })) {
-            Button("好", role: .cancel) { camera.message = nil }
-        } message: {
-            Text(camera.message ?? "")
-        }
+            .onChange(of: scenePhase) { _, phase in
+                switch phase {
+                case .active:
+                    camera.start()
+                    level.start()
+                    if isPortrait { director.start() }
+                case .background:
+                    camera.stop()
+                    level.stop()
+                    director.stop()
+                default:
+                    break
+                }
+            }
+    }
+
+    private func portraitHooks<V: View>(_ view: V) -> some View {
+        view
+            .onChange(of: modeRaw) { _, _ in
+                if isPortrait { enterPortrait() } else { leavePortrait() }
+            }
+            .onChange(of: aspectRaw) { _, _ in director.aspect = aspect }
+            .onChange(of: level.lookingDown) { _, down in director.lookingDown = down }
+            .onChange(of: templateChoice) { _, choice in
+                director.manualTemplateID = choice == "auto" ? nil : choice
+            }
+            .onChange(of: director.template.id) { _, _ in
+                if isPortrait { camera.setExposureBias(director.template.ev) }
+            }
+            .sensoryFeedback(.success, trigger: director.guidance.ready) { _, ready in ready }
     }
 
     // MARK: - 取景层（全屏）
@@ -87,12 +132,15 @@ struct CameraScreen: View {
             ZStack {
                 Color.black
                 if camera.status == .running || camera.status == .idle {
-                    FilmViewfinder(frames: camera.frames, look: look, grainScale: grain.scale, aspect: aspect)
+                    FilmViewfinder(frames: camera.frames, look: look, grainScale: effectiveGrain, aspect: aspect)
                 }
                 ViewfinderMask(photoRect: photo)
                 photoDecorations
                     .frame(width: photo.width, height: photo.height)
                     .position(x: photo.midX, y: photo.midY)
+                if isPortrait && showGuide && camera.status == .running {
+                    PortraitOverlay(analysis: director.analysis, guidance: director.guidance, geometry: geometry)
+                }
                 if let focusPoint {
                     FocusReticle()
                         .id(focusToken)
@@ -196,9 +244,13 @@ struct CameraScreen: View {
 
     private var hud: some View {
         HStack(spacing: 8) {
-            Text(look.name)
+            Text(isPortrait ? "人像 · \(director.template.name)" : look.name)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.white)
+            if isPortrait {
+                Text(templateChoice == "auto" ? "自动" : "手动")
+                    .foregroundStyle(templateChoice == "auto" ? Theme.amber : .white)
+            }
             Text(aspect.rawValue)
             if camera.exposureBias != 0 {
                 Button {
@@ -228,8 +280,16 @@ struct CameraScreen: View {
 
             Spacer()
 
+            if isPortrait && showPoses {
+                PoseCard(pose: director.pose, tip: director.charmTip) { withAnimation { director.nextPose() } }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+            }
+            zoomSuggestion
             FocalSelector(presets: camera.zoomPresets, selected: camera.zoomIndex) { camera.selectZoom($0) }
-                .padding(.bottom, 14)
+                .padding(.bottom, 6)
+            ModeSwitch(modeRaw: $modeRaw)
+                .padding(.bottom, 8)
 
             HStack {
                 ThumbnailButton(image: camera.lastThumbnail)
@@ -245,18 +305,25 @@ struct CameraScreen: View {
 
     private var wideControls: some View {
         HStack(spacing: 0) {
-            VStack {
+            VStack(alignment: .leading) {
                 hud
                 Spacer()
+                if isPortrait && showPoses {
+                    PoseCard(pose: director.pose, tip: director.charmTip) { withAnimation { director.nextPose() } }
+                        .frame(maxWidth: 340)
+                }
             }
             .padding(.leading, 20)
-            .padding(.top, 12)
+            .padding(.vertical, 12)
 
             Spacer()
 
             VStack(spacing: 0) {
                 GlassButton(systemName: "line.3.horizontal") { openPanel() }
+                ModeSwitch(modeRaw: $modeRaw)
+                    .padding(.top, 10)
                 Spacer()
+                zoomSuggestion
                 FocalSelector(presets: camera.zoomPresets, selected: camera.zoomIndex, vertical: true) { camera.selectZoom($0) }
                     .padding(.bottom, 16)
                 ShutterButton(size: 78, busy: camera.processingCount > 0) { shoot() }
@@ -316,6 +383,13 @@ struct CameraScreen: View {
                         keepOriginal: $keepOriginal,
                         watermarkOn: $watermarkOn,
                         watermarkText: $watermarkText,
+                        modeRaw: $modeRaw,
+                        skinRaw: $skinRaw,
+                        beautyRaw: $beautyRaw,
+                        showPoses: $showPoses,
+                        showGuide: $showGuide,
+                        templateChoice: $templateChoice,
+                        autoTemplateName: director.autoTemplate.name,
                         zoomPresets: camera.zoomPresets,
                         zoomIndex: camera.zoomIndex,
                         isFront: camera.position == .front,
@@ -362,7 +436,11 @@ struct CameraScreen: View {
             }
             .onEnded { value in
                 if dragAxis == .horizontal, abs(value.translation.width) > 50 {
-                    stepLook(value.translation.width < 0 ? 1 : -1)
+                    if isPortrait {
+                        stepTemplate(value.translation.width < 0 ? 1 : -1)
+                    } else {
+                        stepLook(value.translation.width < 0 ? 1 : -1)
+                    }
                 }
                 dragAxis = nil
                 withAnimation(.easeOut(duration: 0.4).delay(0.6)) { showEV = false }
@@ -371,6 +449,50 @@ struct CameraScreen: View {
     }
 
     // MARK: - Actions
+
+    private var zoomSuggestion: some View {
+        Group {
+            if isPortrait, let label = director.guidance.suggestZoom,
+               let preset = camera.zoomPresets.first(where: { $0.label == label }),
+               camera.zoomPresets[safe: camera.zoomIndex]?.label != label {
+                Button {
+                    camera.selectZoom(preset.id)
+                } label: {
+                    Text("切到 \(label)")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 12)
+                        .frame(height: 26)
+                        .background(Capsule().fill(Theme.amber))
+                }
+                .buttonStyle(PressScaleStyle())
+                .padding(.bottom, 6)
+            }
+        }
+    }
+
+    private func enterPortrait() {
+        director.camera = camera
+        director.start()
+        camera.setExposureBias(director.template.ev)
+        if let two = camera.zoomPresets.first(where: { $0.label == "1×" }), camera.zoomPresets[safe: camera.zoomIndex]?.label == "0.5×" {
+            camera.selectZoom(two.id)
+        }
+    }
+
+    private func leavePortrait() {
+        director.stop()
+        camera.setExposureBias(0)
+    }
+
+    private func stepTemplate(_ delta: Int) {
+        let all = PortraitLibrary.templates
+        let current = all.firstIndex(where: { $0.id == director.template.id }) ?? 0
+        let next = all[(current + delta + all.count) % all.count]
+        templateChoice = next.id
+        director.manualTemplateID = next.id
+        showToast(next.look(skin: skin, sample: nil))
+    }
 
     private func stepLook(_ delta: Int) {
         let all = FilmLook.all
@@ -409,7 +531,11 @@ struct CameraScreen: View {
         shotCount += 1
         flash = true
         withAnimation(.easeOut(duration: 0.28)) { flash = false }
-        camera.capture(look: look, aspect: aspect, grainScale: grain.scale,
-                       keepOriginal: keepOriginal, watermark: activeWatermark)
+        let portrait: PortraitOptions? = isPortrait
+            ? PortraitOptions(smoothing: beauty.smoothing * director.template.smoothingBoost,
+                              backgroundSoft: director.template.backgroundSoft)
+            : nil
+        camera.capture(look: look, aspect: aspect, grainScale: effectiveGrain,
+                       keepOriginal: keepOriginal, watermark: activeWatermark, portrait: portrait)
     }
 }

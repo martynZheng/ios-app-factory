@@ -10,6 +10,13 @@ struct SidePanel: View {
     @Binding var keepOriginal: Bool
     @Binding var watermarkOn: Bool
     @Binding var watermarkText: String
+    @Binding var modeRaw: String
+    @Binding var skinRaw: String
+    @Binding var beautyRaw: String
+    @Binding var showPoses: Bool
+    @Binding var showGuide: Bool
+    @Binding var templateChoice: String
+    let autoTemplateName: String
 
     let zoomPresets: [ZoomPreset]
     let zoomIndex: Int
@@ -23,7 +30,16 @@ struct SidePanel: View {
             header
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 26) {
-                    filmSection
+                    section("模式") {
+                        OptionChips(options: ["胶片", "人像"], selected: modeRaw == "portrait" ? "人像" : "胶片") {
+                            modeRaw = $0 == "人像" ? "portrait" : "film"
+                        }
+                    }
+                    if modeRaw == "portrait" {
+                        portraitSection
+                    } else {
+                        filmSection
+                    }
                     section("焦段") {
                         OptionChips(options: zoomPresets.map { $0.focal },
                                     selected: zoomPresets.indices.contains(zoomIndex) ? zoomPresets[zoomIndex].focal : "") { focal in
@@ -100,7 +116,7 @@ struct SidePanel: View {
 
     private var filmSection: some View {
         VStack(alignment: .leading, spacing: 18) {
-            ForEach(FilmLook.Family.allCases, id: \.self) { family in
+            ForEach(FilmLook.Family.film, id: \.self) { family in
                 section(family.rawValue) {
                     VStack(spacing: 6) {
                         ForEach(FilmLook.all.filter { $0.family == family }) { look in
@@ -109,6 +125,58 @@ struct SidePanel: View {
                     }
                 }
             }
+        }
+    }
+
+    private var portraitSection: some View {
+        VStack(alignment: .leading, spacing: 26) {
+            section("肤色") {
+                VStack(alignment: .leading, spacing: 8) {
+                    OptionChips(options: SkinTone.allCases.map { $0.rawValue }, selected: skinRaw) { skinRaw = $0 }
+                    Text(skinHint)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.dim)
+                }
+            }
+            section("美颜") {
+                VStack(alignment: .leading, spacing: 8) {
+                    OptionChips(options: BeautyLevel.allCases.map { $0.rawValue }, selected: beautyRaw) { beautyRaw = $0 }
+                    Text("只磨肤色区域并保留皮肤纹理，像本人但更好看")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.dim)
+                }
+            }
+            section("场景模板") {
+                VStack(alignment: .leading, spacing: 8) {
+                    TemplateCell(title: "自动", subtitle: "当前识别：\(autoTemplateName)", selected: templateChoice == "auto") {
+                        templateChoice = "auto"
+                    }
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                        ForEach(PortraitLibrary.templates) { t in
+                            TemplateCell(title: t.name, subtitle: t.note, selected: templateChoice == t.id) {
+                                templateChoice = t.id
+                            }
+                        }
+                    }
+                }
+            }
+            section("引导") {
+                VStack(spacing: 0) {
+                    PanelToggle(title: "构图引导", isOn: $showGuide)
+                    PanelToggle(title: "姿势建议", isOn: $showPoses)
+                }
+            }
+        }
+    }
+
+    private var skinHint: String {
+        switch SkinTone(rawValue: skinRaw) ?? .smart {
+        case .smart: return "根据画面里测到的肤色自动提亮、去黄、加气色"
+        case .natural: return "轻微提亮，保持本来的肤色"
+        case .fair: return "冷白通透，去掉皮肤黄气"
+        case .peach: return "粉嫩好气色，甜妹感"
+        case .warm: return "暖调健康，适合秋冬和室内"
+        case .tan: return "保留小麦色的健康光泽"
         }
     }
 
@@ -236,5 +304,37 @@ struct PanelToggle: View {
         }
         .tint(Theme.amber)
         .frame(height: 40)
+    }
+}
+
+struct TemplateCell: View {
+    let title: String
+    let subtitle: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(selected ? Theme.amber : .white)
+                Text(subtitle)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.dim)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(selected ? Theme.amber.opacity(0.14) : Color.white.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(selected ? Theme.amber.opacity(0.7) : .clear, lineWidth: 1)
+            )
+        }
+        .buttonStyle(PressScaleStyle())
     }
 }

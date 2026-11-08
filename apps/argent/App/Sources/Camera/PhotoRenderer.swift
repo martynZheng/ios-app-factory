@@ -3,6 +3,7 @@ import ImageIO
 import Photos
 import UIKit
 import UniformTypeIdentifiers
+import Vision
 
 /// 成片冲洗：原始照片数据 → 裁切 → 胶片管线 → 带 EXIF 的 HEIC。
 enum PhotoRenderer {
@@ -11,11 +12,14 @@ enum PhotoRenderer {
         let thumbnail: UIImage
     }
 
-    static func render(data: Data, look: FilmLook, aspect: AspectRatio, grainScale: Float, watermark: String?, context: CIContext) -> Result? {
+    static func render(data: Data, look: FilmLook, aspect: AspectRatio, grainScale: Float, watermark: String?, portrait: PortraitOptions?, context: CIContext) -> Result? {
         guard let source = CIImage(data: data, options: [.applyOrientationProperty: true]) else { return nil }
 
         var image = aspect.crop(source)
         image = image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
+        if let portrait {
+            image = PortraitRetouch.apply(portrait, to: image)
+        }
         image = FilmProcessor.shared.apply(look, to: image, grainScale: grainScale, seed: CGFloat.random(in: 0...4000))
         if let watermark, !watermark.isEmpty {
             image = Watermark.apply(watermark, to: image)
@@ -119,5 +123,83 @@ enum Watermark {
         let y = e.minY + margin - pad
         let stamp = CIImage(cgImage: cgImage).transformed(by: CGAffineTransform(translationX: x, y: y))
         return stamp.composited(over: image).cropped(to: e)
+    }
+}
+
+/// 人像成片处理的参数。
+struct PortraitOptions {
+    var smoothing: Float          // 磨皮强度 0~1
+    var backgroundSoft: Float     // 背景柔化（甜水空气感）0~1
+}
+
+/// 人像后期：人像分割 → 肤色区域磨皮（保留纹理）→ 背景轻柔化提亮。
+enum PortraitRetouch {
+    static func apply(_ options: PortraitOptions, to image: CIImage) -> CIImage {
+        let extent = image.extent
+        guard extent.width > 1, extent.height > 1 else { return image }
+        let shortSide = min(extent.width, extent.height)
+
+        // 人像分割蒙版（白 = 人）
+        var personMask: CIImage?
+        let request = VNGeneratePersonSegmentationRequest()
+        request.qualityLevel = .balanced
+        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        let handler = VNImageRequestHandler(ciImage: image, options: [:])
+        if (try? handler.perform([request])) != nil, let buffer = request.results?.first?.pixelBuffer {
+            let mask = CIImage(cvPixelBuffer: buffer)
+            let sx = extent.width / mask.extent.width
+            let sy = extent.height / mask.extent.height
+            personMask = mask
+                .transformed(by: CGAffineTransform(scaleX: sx, y: sy))
+                .transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
+                .clampedToExtent()
+                .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: shortSide * 0.004])
+                .cropped(to: extent)
+        }
+
+        var out = image
+
+        // 1. 磨皮：只在“人身上 × 像肤色”的区域，把模糊版按强度混回，保留部分纹理
+        if options.smoothing > 0.01 {
+            let radius = max(1.5, shortSide * 0.0045)
+            let blurred = image.clampedToExtent()
+                .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
+                .cropped(to: extent)
+            var mask = FilmProcessor.shared.skinMask(image)
+                .clampedToExtent()
+                .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius * 0.8])
+                .cropped(to: extent)
+            if let personMask {
+                mask = mask.applyingFilter("CIMultiplyCompositing", parameters: [kCIInputBackgroundImageKey: personMask])
+            }
+            let k = CGFloat(min(options.smoothing, 1)) * 0.85
+            mask = mask.applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: k, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: k, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: k, w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+            ])
+            out = blurred.applyingFilter("CIBlendWithMask", parameters: [
+                kCIInputBackgroundImageKey: out,
+                kCIInputMaskImageKey: mask,
+            ])
+        }
+
+        // 2. 背景柔化：背景轻微模糊 + 提亮，主体保持清晰
+        if options.backgroundSoft > 0.01, let personMask {
+            let soft = CGFloat(min(options.backgroundSoft, 1))
+            let background = out.clampedToExtent()
+                .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: shortSide * 0.006 * soft])
+                .cropped(to: extent)
+                .applyingFilter("CIColorControls", parameters: [
+                    kCIInputBrightnessKey: 0.03 * soft,
+                    kCIInputContrastKey: 1 - 0.06 * soft,
+                ])
+            out = out.applyingFilter("CIBlendWithMask", parameters: [
+                kCIInputBackgroundImageKey: background,
+                kCIInputMaskImageKey: personMask,
+            ])
+        }
+        return out.cropped(to: extent)
     }
 }

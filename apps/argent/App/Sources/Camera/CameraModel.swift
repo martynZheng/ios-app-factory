@@ -76,6 +76,7 @@ final class CameraModel: NSObject, ObservableObject {
         let grainScale: Float
         let keepOriginal: Bool
         let watermark: String?
+        let portrait: PortraitOptions?
     }
 
     private var lastFrameSize: CGSize = .zero
@@ -275,6 +276,26 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - 测光数据（人像模式判断光线）
+
+    func lightMetrics() -> LightMetrics {
+        guard let device = currentDevice else { return LightMetrics(ev100: 10, kelvin: 5500) }
+        let iso = Double(max(device.iso, 1))
+        let seconds = max(CMTimeGetSeconds(device.exposureDuration), 1e-5)
+        let aperture = Double(max(device.lensAperture, 1))
+        let ev100 = log2(aperture * aperture / seconds) - log2(iso / 100)
+        var kelvin = 5500.0
+        let gains = device.deviceWhiteBalanceGains
+        if gains.redGain >= 1, gains.greenGain >= 1, gains.blueGain >= 1 {
+            let clamped = AVCaptureDevice.WhiteBalanceGains(
+                redGain: min(gains.redGain, device.maxWhiteBalanceGain),
+                greenGain: min(gains.greenGain, device.maxWhiteBalanceGain),
+                blueGain: min(gains.blueGain, device.maxWhiteBalanceGain))
+            kelvin = Double(device.temperatureAndTintValues(for: clamped).temperature)
+        }
+        return LightMetrics(ev100: ev100, kelvin: kelvin)
+    }
+
     // MARK: - Controls
 
     func switchCamera() {
@@ -345,7 +366,7 @@ final class CameraModel: NSObject, ObservableObject {
 
     // MARK: - Capture
 
-    func capture(look: FilmLook, aspect: AspectRatio, grainScale: Float, keepOriginal: Bool, watermark: String?) {
+    func capture(look: FilmLook, aspect: AspectRatio, grainScale: Float, keepOriginal: Bool, watermark: String?, portrait: PortraitOptions? = nil) {
         guard status == .running else { return }
         let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 90
         let isFront = position == .front
@@ -374,7 +395,7 @@ final class CameraModel: NSObject, ObservableObject {
             }
 
             self.pendingLock.lock()
-            self.pending[settings.uniqueID] = PendingCapture(look: look, aspect: aspect, grainScale: grainScale, keepOriginal: keepOriginal, watermark: watermark)
+            self.pending[settings.uniqueID] = PendingCapture(look: look, aspect: aspect, grainScale: grainScale, keepOriginal: keepOriginal, watermark: watermark, portrait: portrait)
             self.pendingLock.unlock()
 
             self.photoOutput.capturePhoto(with: settings, delegate: self)
@@ -418,7 +439,7 @@ extension CameraModel: AVCapturePhotoCaptureDelegate {
         }
         processingQueue.async {
             guard let result = PhotoRenderer.render(data: data, look: job.look, aspect: job.aspect,
-                                                    grainScale: job.grainScale, watermark: job.watermark,
+                                                    grainScale: job.grainScale, watermark: job.watermark, portrait: job.portrait,
                                                     context: self.photoContext) else {
                 self.finishProcessing(thumbnail: nil, error: "冲洗失败，请重试")
                 return
