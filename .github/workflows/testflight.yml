@@ -44,7 +44,7 @@ jobs:
               list=$(echo "$changed" | grep -E '^apps/[^/]+/' | cut -d/ -f2 | sort -u)
             fi
           fi
-          json=$(printf '%s\n' $list | python3 -c 'import sys,json,os; print(json.dumps([l.strip() for l in sys.stdin if l.strip() and os.path.isdir("apps/"+l.strip())]))')
+          json=$(printf '%s\n' $list | python3 -c 'import sys,json,os; print(json.dumps([l.strip() for l in sys.stdin if l.strip() and os.path.isdir("apps/"+l.strip()) and "SKIP_CI=1" not in open("apps/"+l.strip()+"/app.env").read()]))')
           echo "apps=$json"
           echo "apps=$json" >> "$GITHUB_OUTPUT"
 
