@@ -20,10 +20,15 @@
    gh run view <id> --log-failed | grep -E "error:|❌|Error" | head -50 # 失败时看错误
    ```
    失败就修、再推、再盯，直到成功；连续 5 次失败就停下，把错误原文和你的判断告诉用户。
-   如果 `gh` 没登录/不可用（云端会话的代理会拦截 Actions API，返回 403）：仓库是公开的，用 WebFetch 读
-   `https://github.com/martynZheng/ios-app-factory/actions` 看最新运行状态，失败时再 WebFetch 那次 run 的页面
-   （`/actions/runs/<id>`）读 annotations 里的报错。WebFetch 有约 15 分钟缓存，轮询时给 URL 加 `?t=<时间戳>`。
-   仍看不到具体错误时，请用户把 Actions 页面的红色报错截图发给你。
+   如果 `gh` 不可用（云端会话里 GH_TOKEN 无效，且代理拦截写类 Actions API）：仓库是公开的，可以不带认证直接读：
+   ```bash
+   R=martynZheng/ios-app-factory; SHA=$(git rev-parse HEAD)
+   # 状态（check-run id 就是 job id）；status=queued/in_progress/completed，conclusion=success/failure
+   curl -sS https://api.github.com/repos/$R/commits/$SHA/check-runs | python3 -c "import json,sys;[print(c['id'],c['status'],c['conclusion']) for c in json.load(sys.stdin)['check_runs']]"
+   # 失败时拉完整日志找错误
+   curl -sSL https://api.github.com/repos/$R/actions/jobs/<job_id>/logs | grep -nE "error:|❌|\[!\]" | head -40
+   ```
+   每隔 2–3 分钟轮询一次（sleep），macOS runner 排队可能要几分钟。仍拿不到错误时，请用户把 Actions 页面的红色报错截图发给你。
 6. 成功后告诉用户：做了什么、版本号（如 `1.0.0 (12.1)`），"苹果处理 5–15 分钟后 TestFlight 会推送更新"。
 
 ## Swift / SwiftUI 规则（降低盲写编译失败率）
