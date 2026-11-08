@@ -20,17 +20,19 @@ struct PortraitAnalysis {
     var frameLuma: Double = 0
 }
 
-/// 屏幕上的引导。
+/// 屏幕上的引导：以“目标框”为主，文字只是一两个字的补充。
+/// 所有矩形都是成片区域内的归一化坐标（左上为原点）。
 struct PortraitGuidance: Equatable {
-    var message: String
-    var arrow: Arrow?
-    var ready: Bool
-    var targetInPhoto: CGPoint?      // 成片区域内的归一化目标点（眼睛该在的位置）
-    var suggestZoom: String?         // 建议的焦段标签，如 "2×"
+    enum Silhouette: Equatable { case none, head, body }
 
-    enum Arrow: Equatable {
-        case left, right, up, down, back, lower
-    }
+    var target: CGRect?              // 主角应该在的位置和大小
+    var current: CGRect?             // 主角现在的位置和大小
+    var silhouette: Silhouette = .none
+    var score: Double = 0            // 0~1，越接近目标越高
+    var ready = false
+    var hint: String = ""            // 简短提示：“靠近一点”“往右一点”“完美”
+    var warning: String?             // 需要额外注意的问题（0.5× 变形、俯拍、切脚……）
+    var suggestZoom: String?
 }
 
 /// 智能人像导演：定时取取景帧做 Vision 分析，自动挑模板、给构图引导、推荐姿势，并对脸测光。
@@ -39,7 +41,7 @@ final class PortraitDirector: ObservableObject {
     @Published private(set) var autoTemplate: PortraitTemplate = PortraitLibrary.templates[0]
     @Published private(set) var light: LightKind = .sunny
     @Published private(set) var scene: SceneKind = .general
-    @Published private(set) var guidance = PortraitGuidance(message: "把人物放进取景框", arrow: nil, ready: false)
+    @Published private(set) var guidance = PortraitGuidance(hint: "把人物放进取景框")
     @Published private(set) var pose: PoseIdea?
     @Published private(set) var charmTip: String = ""
 
@@ -149,113 +151,113 @@ final class PortraitDirector: ObservableObject {
 
     private func makeGuidance(_ a: PortraitAnalysis) -> PortraitGuidance {
         guard let camera, let face = a.primaryFace else {
-            return PortraitGuidance(message: "把人物放进取景框", arrow: nil, ready: false)
+            return PortraitGuidance(hint: "把人物放进取景框")
         }
-        let geometry = ViewfinderGeometry(frameSize: camera.frameSize, viewSize: camera.frameSize, aspect: aspect)
-        let crop = geometry.cropInFrame
         let fw = camera.frameSize.width
         let fh = camera.frameSize.height
-        guard crop.width > 0, crop.height > 0, fw > 0, fh > 0 else {
-            return PortraitGuidance(message: "", arrow: nil, ready: false)
-        }
-        // 转成成片区域内的坐标
-        func toPhoto(_ p: CGPoint) -> CGPoint {
-            CGPoint(x: (p.x * fw - crop.minX) / crop.width, y: (p.y * fh - crop.minY) / crop.height)
-        }
-        let eyes = toPhoto(CGPoint(x: face.midX, y: face.minY + face.height * 0.42))
-        let faceTop = toPhoto(CGPoint(x: face.midX, y: face.minY)).y
-        let faceH = face.height * fh / crop.height
-        let headTop = faceTop - faceH * 0.35
-        let isFront = camera.position == .front
+        let crop = aspect.cropRect(in: CGRect(x: 0, y: 0, width: fw, height: fh))
+        guard crop.width > 0, crop.height > 0, fw > 0, fh > 0 else { return PortraitGuidance() }
 
+        // 帧坐标 → 成片坐标
+        func toPhoto(_ r: CGRect) -> CGRect {
+            CGRect(x: (r.minX * fw - crop.minX) / crop.width,
+                   y: (r.minY * fh - crop.minY) / crop.height,
+                   width: r.width * fw / crop.width,
+                   height: r.height * fh / crop.height)
+        }
+        func photoY(_ y: CGFloat) -> CGFloat { (y * fh - crop.minY) / crop.height }
+
+        let faceP = toPhoto(face)
+        let isFront = camera.position == .front
+        var g = PortraitGuidance()
+
+        // 视线方向留白：脸朝右，人就放左边
         var targetX: CGFloat = 0.5
-        var targetY: CGFloat = 0.36
-        var suggestZoom: String?
+        if abs(a.faceYaw) > 0.25 {
+            let side: CGFloat = a.faceYaw > 0 ? -1 : 1
+            targetX = 0.5 + side * (a.framing == .closeUp ? 0.09 : 0.13)
+        }
+        let photoAspect = crop.width / crop.height   // 宽/高
 
         switch a.framing {
-        case .closeUp:
-            targetY = 0.40
-            // 视线方向留白：脸朝右就放左三分线
-            if abs(a.faceYaw) > 0.25 { targetX = a.faceYaw > 0 ? 0.40 : 0.60 }
-        case .halfBody:
-            targetY = 0.33
-            if abs(a.faceYaw) > 0.25 { targetX = a.faceYaw > 0 ? 0.38 : 0.62 }
-            if let preset = camera.zoomPresets[safe: camera.zoomIndex], preset.label == "0.5×" { suggestZoom = "2×" }
         case .fullBody:
-            targetY = 0.16
+            // 全身：头顶在 8%，脚在 93%，显腿长
+            let top = a.bodyTop.map(photoY) ?? (faceP.minY - faceP.height * 0.3)
+            let bottom = a.ankleY.map(photoY) ?? min(1.05, (a.kneeY.map(photoY) ?? faceP.maxY) + faceP.height * 2)
+            let curH = max(0.05, bottom - top)
+            let curW = min(0.9, curH * 0.32 / photoAspect)
+            g.current = CGRect(x: faceP.midX - curW / 2, y: top, width: curW, height: curH)
+            let tH: CGFloat = 0.85
+            let tW = curW * tH / curH
+            g.target = CGRect(x: targetX - tW / 2, y: 0.08, width: tW, height: tH)
+            g.silhouette = .body
         case .group:
-            targetY = 0.36
-        case .none:
-            break
+            let all = a.faces.map(toPhoto)
+            let minX = all.map(\.minX).min() ?? faceP.minX
+            let maxX = all.map(\.maxX).max() ?? faceP.maxX
+            let minY = all.map(\.minY).min() ?? faceP.minY
+            let maxY = all.map(\.maxY).max() ?? faceP.maxY
+            g.current = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+            let tW = min(0.8, max(0.45, g.current!.width))
+            let tH = g.current!.height * tW / max(g.current!.width, 0.01)
+            g.target = CGRect(x: 0.5 - tW / 2, y: 0.30 - tH / 2, width: tW, height: tH)
+            g.silhouette = .none
+        default:
+            // 特写/半身：眼睛在上三分线附近，脸的大小按景别
+            let targetH: CGFloat = a.framing == .closeUp ? 0.34 : 0.17
+            let eyeY: CGFloat = a.framing == .closeUp ? 0.40 : 0.33
+            let tH = targetH
+            let tW = faceP.width / max(faceP.height, 0.001) * tH
+            g.current = faceP
+            g.target = CGRect(x: targetX - tW / 2, y: eyeY - tH * 0.42, width: tW, height: tH)
+            g.silhouette = .head
         }
 
-        // 1. 0.5× 近拍人脸会变形
-        if a.framing == .closeUp || a.framing == .halfBody,
-           let preset = camera.zoomPresets[safe: camera.zoomIndex], preset.label == "0.5×" {
-            return PortraitGuidance(message: "0.5× 近拍会让脸变大，换 2× 并后退两步", arrow: .back, ready: false, targetInPhoto: nil, suggestZoom: "2×")
-        }
+        guard let target = g.target, let current = g.current else { return g }
 
-        // 2. 全身：显腿长 + 不切脚
-        if a.framing == .fullBody {
-            if lookingDown {
-                return PortraitGuidance(message: "手机放低到腰部，镜头微微向上，显腿长", arrow: .lower, ready: false, targetInPhoto: nil, suggestZoom: nil)
-            }
-            if let ankle = a.ankleY.map({ toPhoto(CGPoint(x: 0.5, y: $0)).y }) {
-                if ankle > 0.98 {
-                    return PortraitGuidance(message: "脚快被切到了，后退半步把脚拍完整", arrow: .back, ready: false, targetInPhoto: nil, suggestZoom: nil)
-                }
-                if ankle < 0.84 {
-                    return PortraitGuidance(message: isFront ? "离镜头近一点，让脚靠近画面底部" : "镜头往上抬一点，让脚靠近画面底边", arrow: .up, ready: false, targetInPhoto: nil, suggestZoom: nil)
-                }
-            } else if let knee = a.kneeY.map({ toPhoto(CGPoint(x: 0.5, y: $0)).y }), knee > 0.85 {
-                return PortraitGuidance(message: "别切在膝盖，后退一步拍到脚", arrow: .back, ready: false, targetInPhoto: nil, suggestZoom: nil)
-            }
-        }
+        // 打分：位置偏差 + 大小偏差
+        let dx = current.midX - target.midX
+        let dy = current.midY - target.midY
+        let sizeRatio = Double(current.height / max(target.height, 0.001))
+        let posErr = Double(hypot(dx, dy)) / 0.16
+        let sizeErr = abs(log(max(sizeRatio, 0.01))) / 0.45
+        g.score = max(0, 1 - (posErr * 0.65 + sizeErr * 0.35))
 
-        // 3. 半身别切在关节
-        if a.framing == .halfBody, let hip = a.hipY.map({ toPhoto(CGPoint(x: 0.5, y: $0)).y }), abs(hip - 1) < 0.04 {
-            return PortraitGuidance(message: "画面底边正好切在腰胯，往前或往后挪一点", arrow: .back, ready: false, targetInPhoto: nil, suggestZoom: nil)
-        }
-
-        // 4. 头顶留白
-        if headTop < 0.03 && a.framing != .closeUp {
-            return PortraitGuidance(message: "头顶太挤了，镜头往上一点留出空间", arrow: .up, ready: false, targetInPhoto: CGPoint(x: targetX, y: targetY), suggestZoom: suggestZoom)
-        }
-
-        // 5. 位置：眼睛放在目标点（三分线）
-        let dx = eyes.x - targetX
-        let dy = eyes.y - targetY
-        let tolX: CGFloat = 0.07
-        let tolY: CGFloat = a.framing == .fullBody ? 0.08 : 0.06
-        let target = CGPoint(x: targetX, y: targetY)
-        if abs(dx) > tolX || abs(dy) > tolY {
-            if abs(dx) / tolX >= abs(dy) / tolY {
-                let subjectRight = dx > 0
-                let msg: String
-                if isFront {
-                    msg = subjectRight ? "往画面左边挪一点" : "往画面右边挪一点"
-                } else {
-                    msg = subjectRight ? "人物偏右，手机向右移一点" : "人物偏左，手机向左移一点"
-                }
-                return PortraitGuidance(message: msg, arrow: subjectRight ? .right : .left, ready: false, targetInPhoto: target, suggestZoom: suggestZoom)
+        // 简短提示：先大小，再位置
+        if sizeRatio < 0.78 {
+            g.hint = a.framing == .fullBody ? "再近一点" : (isFront ? "靠近一点" : "走近一点")
+        } else if sizeRatio > 1.3 {
+            g.hint = "后退一点"
+        } else if abs(dx) > 0.06 || abs(dy) > 0.06 {
+            if abs(dx) >= abs(dy) {
+                g.hint = isFront ? (dx > 0 ? "往左挪" : "往右挪") : (dx > 0 ? "手机往右" : "手机往左")
             } else {
-                let subjectLow = dy > 0
-                let msg: String
-                if a.framing == .fullBody {
-                    msg = subjectLow ? "人物太靠下，镜头往下一点" : "人物太靠上，镜头往上一点"
-                } else {
-                    msg = subjectLow ? "眼睛放到上三分线，镜头往下一点" : "人物偏上，镜头往上一点"
-                }
-                return PortraitGuidance(message: msg, arrow: subjectLow ? .down : .up, ready: false, targetInPhoto: target, suggestZoom: suggestZoom)
+                g.hint = dy > 0 ? "镜头往下" : "镜头往上"
             }
+        } else if abs(a.faceRoll) > 0.35 {
+            g.hint = "头摆正一点"
+        } else {
+            g.hint = "完美"
         }
 
-        // 6. 头歪太多
-        if abs(a.faceRoll) > 0.35 {
-            return PortraitGuidance(message: "头歪得有点多，回正一点更自然", arrow: nil, ready: false, targetInPhoto: target, suggestZoom: suggestZoom)
+        // 额外问题
+        if let preset = camera.zoomPresets[safe: camera.zoomIndex], preset.label == "0.5×",
+           a.framing == .closeUp || a.framing == .halfBody {
+            g.warning = "0.5× 近拍会让脸变形"
+            g.suggestZoom = "2×"
+        } else if a.framing == .fullBody && lookingDown {
+            g.warning = "手机放低到腰部，略往上拍更显腿长"
+        } else if a.framing == .fullBody, let ankle = a.ankleY.map(photoY), ankle > 0.985 {
+            g.warning = "脚快被切到了"
+        } else if a.framing == .fullBody, a.ankleY == nil, let knee = a.kneeY.map(photoY), knee > 0.85 {
+            g.warning = "别切在膝盖，拍到脚"
+        } else if a.framing == .halfBody, let hip = a.hipY.map(photoY), abs(hip - 1) < 0.04 {
+            g.warning = "底边别正好切在腰胯"
         }
 
-        return PortraitGuidance(message: "构图完美，按快门吧", arrow: nil, ready: true, targetInPhoto: target, suggestZoom: suggestZoom)
+        g.ready = g.score > 0.8 && g.warning == nil && g.hint == "完美"
+        if g.ready { g.hint = "完美，拍！" }
+        return g
     }
 
     // MARK: - 光线 & 场景

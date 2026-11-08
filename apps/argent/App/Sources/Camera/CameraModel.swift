@@ -189,6 +189,9 @@ final class CameraModel: NSObject, ObservableObject {
             if session.canAddOutput(photoOutput) { session.addOutput(photoOutput) }
         }
         photoOutput.maxPhotoQualityPrioritization = .quality
+        if photoOutput.isContentAwareDistortionCorrectionSupported {
+            photoOutput.isContentAwareDistortionCorrectionEnabled = true
+        }
 
         // 成片分辨率：不超过约 24MP（接近 GR 的 2400 万像素），兼顾画质与冲洗速度。
         let dims = device.activeFormat.supportedMaxPhotoDimensions
@@ -384,7 +387,12 @@ final class CameraModel: NSObject, ObservableObject {
                 settings = AVCapturePhotoSettings()
             }
             settings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
-            settings.photoQualityPrioritization = .balanced
+            // 人像：画质优先（多帧合成、Deep Fusion 等由系统决定），胶片模式保持快门速度
+            settings.photoQualityPrioritization = portrait != nil ? .quality : .balanced
+            // 超广角拍人时自动校正边缘人脸变形
+            if self.photoOutput.isContentAwareDistortionCorrectionSupported {
+                settings.isAutoContentAwareDistortionCorrectionEnabled = true
+            }
 
             if let connection = self.photoOutput.connection(with: .video) {
                 if connection.isVideoRotationAngleSupported(angle) { connection.videoRotationAngle = angle }

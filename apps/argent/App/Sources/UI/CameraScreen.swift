@@ -67,6 +67,10 @@ struct CameraScreen: View {
             Theme.ink.ignoresSafeArea()
             viewfinderLayer
                 .ignoresSafeArea()
+            // 不可见的方向锚点：RotationCoordinator 靠它得知界面方向，取景帧才能被正确转正
+            RotationAnchor(layer: camera.anchorLayer)
+                .frame(width: 2, height: 2)
+                .allowsHitTesting(false)
             controlsLayer
             if !hintSeen && camera.status == .running {
                 hint

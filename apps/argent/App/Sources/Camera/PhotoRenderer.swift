@@ -157,12 +157,19 @@ enum PortraitRetouch {
                 .cropped(to: extent)
         }
 
+        // 0. 清晰度：先整体轻锐化（亮度通道），随后磨皮会把皮肤区域换回柔和版，
+        //    于是眼睛、睫毛、头发、衣服纹理更清楚，而皮肤保持干净。
         var out = image
+            .applyingFilter("CISharpenLuminance", parameters: [
+                kCIInputSharpnessKey: 0.45,
+                kCIInputRadiusKey: max(1.2, shortSide * 0.0009),
+            ])
+            .cropped(to: extent)
 
         // 1. 磨皮：只在“人身上 × 像肤色”的区域，把模糊版按强度混回，保留部分纹理
         if options.smoothing > 0.01 {
             let radius = max(1.5, shortSide * 0.0045)
-            let blurred = image.clampedToExtent()
+            let blurred = out.clampedToExtent()
                 .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
                 .cropped(to: extent)
             var mask = FilmProcessor.shared.skinMask(image)
