@@ -11,7 +11,7 @@
 ## 仓库里有多个 App
 每个 App 一个目录：`apps/<name>/`（`app.env`、`project.yml`、`App/Sources`、`App/Resources`）。
 - `apps/argent` —— 银盐（胶片相机）
-- `apps/starmall` —— 星光百货（女性向放置经营游戏）。**目前临时借用 argent 的 Bundle ID `com.deffisoan.appfactory`，argent 设了 SKIP_CI=1。** 用户注册好 `com.deffisoan.starmall` 后：改回 starmall 的 BUNDLE_ID，删掉 argent 的 SKIP_CI。
+- `apps/starmall` —— 星光百货（女性向放置经营游戏）。**目前暂停（SKIP_CI=1）**：它的 BUNDLE_ID 还是借用的 `com.deffisoan.appfactory`（归相机用）。用户注册好 `com.deffisoan.starmall` 后：改回 starmall 的 BUNDLE_ID，删掉它的 SKIP_CI。
 `app.env` 里有 `SKIP_CI=1` 的 App 不会被构建。
 push 时 CI 只构建改动过的 App（改了 `fastlane/`、`.github/` 则全部构建）。先确认用户说的是哪个 App，只改那个目录。
 
