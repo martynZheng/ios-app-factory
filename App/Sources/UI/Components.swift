@@ -5,7 +5,6 @@ import SwiftUI
 enum Theme {
     static let amber = Color(red: 0.93, green: 0.64, blue: 0.26)
     static let ink = Color(red: 0.035, green: 0.035, blue: 0.04)
-    static let panel = Color(white: 0.09)
     static let line = Color.white.opacity(0.12)
     static let dim = Color.white.opacity(0.55)
 
@@ -17,7 +16,7 @@ enum Theme {
 // MARK: - 快门
 
 struct ShutterButton: View {
-    var size: CGFloat = 76
+    var size: CGFloat = 74
     var busy: Bool
     var action: () -> Void
 
@@ -25,16 +24,17 @@ struct ShutterButton: View {
         Button(action: action) {
             ZStack {
                 Circle()
-                    .strokeBorder(Color.white.opacity(0.9), lineWidth: 3)
+                    .strokeBorder(Color.white.opacity(0.95), lineWidth: 2.5)
                     .frame(width: size, height: size)
                 Circle()
                     .fill(Color.white)
-                    .frame(width: size - 14, height: size - 14)
+                    .frame(width: size - 12, height: size - 12)
                 if busy {
                     ProgressRing()
                         .frame(width: size + 10, height: size + 10)
                 }
             }
+            .shadow(color: .black.opacity(0.35), radius: 8)
             .contentShape(Circle())
         }
         .buttonStyle(PressScaleStyle())
@@ -64,47 +64,21 @@ struct ProgressRing: View {
     }
 }
 
-// MARK: - 小按钮
-
-struct ChipButton: View {
-    let title: String
-    var value: String? = nil
-    var active = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
-                Text(title)
-                    .foregroundStyle(active ? Theme.amber : Theme.dim)
-                if let value {
-                    Text(value)
-                        .foregroundStyle(active ? Theme.amber : .white)
-                }
-            }
-            .font(Theme.mono(11, .semibold))
-            .padding(.horizontal, 9)
-            .frame(height: 28)
-            .background(Capsule().fill(Color.white.opacity(0.06)))
-            .overlay(Capsule().strokeBorder(active ? Theme.amber.opacity(0.6) : Theme.line, lineWidth: 1))
-        }
-        .buttonStyle(PressScaleStyle())
-    }
-}
-
-struct IconButton: View {
+/// 圆形玻璃按钮（菜单等）。
+struct GlassButton: View {
     let systemName: String
-    var size: CGFloat = 44
+    var size: CGFloat = 46
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: size * 0.38, weight: .medium))
+                .font(.system(size: size * 0.36, weight: .medium))
                 .foregroundStyle(.white)
                 .frame(width: size, height: size)
-                .background(Circle().fill(Color.white.opacity(0.08)))
-                .overlay(Circle().strokeBorder(Theme.line, lineWidth: 1))
+                .background(Circle().fill(.ultraThinMaterial))
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.15), lineWidth: 0.5))
+                .environment(\.colorScheme, .dark)
         }
         .buttonStyle(PressScaleStyle())
     }
@@ -119,64 +93,67 @@ struct ThumbnailButton: View {
             if let url = URL(string: "photos-redirect://") { UIApplication.shared.open(url) }
         } label: {
             ZStack {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.white.opacity(0.06))
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(.ultraThinMaterial)
                 if let image {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFill()
                         .frame(width: size, height: size)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                         .transition(.scale(scale: 0.6).combined(with: .opacity))
                         .id(image)
+                } else {
+                    Image(systemName: "photo.on.rectangle")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Theme.dim)
                 }
             }
             .frame(width: size, height: size)
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.line, lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5))
+            .environment(\.colorScheme, .dark)
         }
         .buttonStyle(PressScaleStyle())
         .accessibilityLabel("打开相册")
     }
 }
 
-// MARK: - 焦段
-
-struct ZoomBar: View {
+/// 主界面上唯一的“参数”：焦段。只显示数字，选中的为琥珀色。
+struct FocalSelector: View {
     let presets: [ZoomPreset]
     let selected: Int
     var vertical = false
     let onSelect: (Int) -> Void
 
     var body: some View {
-        let layout = vertical ? AnyLayout(VStackLayout(spacing: 6)) : AnyLayout(HStackLayout(spacing: 6))
+        let layout = vertical ? AnyLayout(VStackLayout(spacing: 4)) : AnyLayout(HStackLayout(spacing: 4))
         layout {
             ForEach(presets) { preset in
                 let isOn = preset.id == selected
                 Button {
                     onSelect(preset.id)
                 } label: {
-                    Text(preset.label)
-                        .font(Theme.mono(isOn ? 12 : 11, .semibold))
-                        .foregroundStyle(isOn ? Color.black : Color.white)
-                        .frame(width: 38, height: 30)
-                        .background(Capsule().fill(isOn ? Theme.amber : Color.white.opacity(0.08)))
+                    Text(preset.focal.replacingOccurrences(of: "mm", with: ""))
+                        .font(Theme.mono(isOn ? 14 : 12, isOn ? .bold : .medium))
+                        .foregroundStyle(isOn ? Theme.amber : Color.white.opacity(0.75))
+                        .frame(width: 40, height: 32)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(PressScaleStyle())
             }
         }
-        .padding(4)
-        .background(Capsule().fill(Color.black.opacity(0.35)))
+        .shadow(color: .black.opacity(0.6), radius: 3)
         .animation(.snappy(duration: 0.2), value: selected)
     }
 }
 
-// MARK: - 胶片选择
+// MARK: - 胶片色板
 
 struct LookSwatch: View {
     let look: FilmLook
     var selected: Bool
-    var width: CGFloat = 52
-    var height: CGFloat = 36
+    var width: CGFloat = 44
+    var height: CGFloat = 30
 
     var body: some View {
         RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -184,110 +161,28 @@ struct LookSwatch: View {
             .frame(width: width, height: height)
             .overlay(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(selected ? Theme.amber : Color.white.opacity(0.15), lineWidth: selected ? 2 : 1)
+                    .strokeBorder(selected ? Theme.amber : Color.white.opacity(0.15), lineWidth: selected ? 2 : 0.5)
             )
-            .overlay(alignment: .bottomLeading) {
-                // 胶片齿孔
-                HStack(spacing: 3) {
-                    ForEach(0..<4, id: \.self) { _ in
-                        RoundedRectangle(cornerRadius: 1).fill(Color.black.opacity(0.35)).frame(width: 4, height: 3)
-                    }
-                }
-                .padding(4)
-            }
     }
 }
 
-struct LookStrip: View {
-    let selectedID: String
-    let onSelect: (FilmLook) -> Void
+// MARK: - 取景装饰
+
+/// 成片区域以外压暗。
+struct ViewfinderMask: View {
+    let photoRect: CGRect
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
-                    ForEach(FilmLook.all) { look in
-                        let isOn = look.id == selectedID
-                        Button {
-                            onSelect(look)
-                        } label: {
-                            VStack(spacing: 5) {
-                                LookSwatch(look: look, selected: isOn)
-                                Text(look.name)
-                                    .font(.system(size: 11, weight: isOn ? .semibold : .regular))
-                                    .foregroundStyle(isOn ? Theme.amber : Theme.dim)
-                            }
-                        }
-                        .buttonStyle(PressScaleStyle())
-                        .id(look.id)
-                    }
-                }
-                .padding(.horizontal, 16)
+        GeometryReader { geo in
+            Path { p in
+                p.addRect(CGRect(origin: .zero, size: geo.size))
+                p.addRect(photoRect)
             }
-            .onChange(of: selectedID) { _, newValue in
-                withAnimation(.snappy) { proxy.scrollTo(newValue, anchor: .center) }
-            }
-            .onAppear { proxy.scrollTo(selectedID, anchor: .center) }
+            .fill(Color.black.opacity(0.62), style: FillStyle(eoFill: true))
         }
+        .allowsHitTesting(false)
     }
 }
-
-struct LookList: View {
-    let selectedID: String
-    let onSelect: (FilmLook) -> Void
-
-    var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 6) {
-                    ForEach(FilmLook.all) { look in
-                        row(look)
-                            .id(look.id)
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-            .onChange(of: selectedID) { _, newValue in
-                withAnimation(.snappy) { proxy.scrollTo(newValue, anchor: .center) }
-            }
-        }
-    }
-
-    private func row(_ look: FilmLook) -> some View {
-        let isOn = look.id == selectedID
-        return Button {
-            onSelect(look)
-        } label: {
-            HStack(spacing: 10) {
-                LookSwatch(look: look, selected: isOn, width: 44, height: 32)
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(look.name)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(isOn ? Theme.amber : .white)
-                        Text(look.code)
-                            .font(Theme.mono(9, .semibold))
-                            .foregroundStyle(Theme.dim)
-                    }
-                    Text(look.note)
-                        .font(.system(size: 10))
-                        .foregroundStyle(Theme.dim)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(8)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(isOn ? Theme.amber.opacity(0.10) : Color.white.opacity(0.03))
-            )
-        }
-        .buttonStyle(PressScaleStyle())
-    }
-}
-
-// MARK: - 取景框装饰
 
 struct GridOverlay: View {
     var body: some View {
@@ -310,20 +205,44 @@ struct GridOverlay: View {
 
 /// 四角取景框线。
 struct FrameCorners: View {
-    var length: CGFloat = 16
+    var length: CGFloat = 14
 
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
-            let inset: CGFloat = 10
+            let i: CGFloat = 0.75
             Path { p in
-                p.move(to: CGPoint(x: inset, y: inset + length)); p.addLine(to: CGPoint(x: inset, y: inset)); p.addLine(to: CGPoint(x: inset + length, y: inset))
-                p.move(to: CGPoint(x: w - inset - length, y: inset)); p.addLine(to: CGPoint(x: w - inset, y: inset)); p.addLine(to: CGPoint(x: w - inset, y: inset + length))
-                p.move(to: CGPoint(x: inset, y: h - inset - length)); p.addLine(to: CGPoint(x: inset, y: h - inset)); p.addLine(to: CGPoint(x: inset + length, y: h - inset))
-                p.move(to: CGPoint(x: w - inset - length, y: h - inset)); p.addLine(to: CGPoint(x: w - inset, y: h - inset)); p.addLine(to: CGPoint(x: w - inset, y: h - inset - length))
+                p.move(to: CGPoint(x: i, y: i + length)); p.addLine(to: CGPoint(x: i, y: i)); p.addLine(to: CGPoint(x: i + length, y: i))
+                p.move(to: CGPoint(x: w - i - length, y: i)); p.addLine(to: CGPoint(x: w - i, y: i)); p.addLine(to: CGPoint(x: w - i, y: i + length))
+                p.move(to: CGPoint(x: i, y: h - i - length)); p.addLine(to: CGPoint(x: i, y: h - i)); p.addLine(to: CGPoint(x: i + length, y: h - i))
+                p.move(to: CGPoint(x: w - i - length, y: h - i)); p.addLine(to: CGPoint(x: w - i, y: h - i)); p.addLine(to: CGPoint(x: w - i, y: h - i - length))
             }
-            .stroke(Color.white.opacity(0.55), lineWidth: 1)
+            .stroke(Color.white.opacity(0.7), lineWidth: 1.5)
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// 取景器里的水印预览，与成片中的位置、比例一致。
+struct WatermarkPreview: View {
+    let text: String
+
+    var body: some View {
+        GeometryReader { geo in
+            let shortSide = min(geo.size.width, geo.size.height)
+            let fontSize = max(7, shortSide * Watermark.sizeRatio)
+            let margin = shortSide * Watermark.marginRatio
+            Text(text)
+                .font(.custom(Watermark.fontName, size: fontSize))
+                .kerning(fontSize * 0.03)
+                .foregroundStyle(.white.opacity(0.92))
+                .shadow(color: .black.opacity(0.45), radius: fontSize * 0.2)
+                .lineLimit(1)
+                .fixedSize()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(.trailing, margin)
+                .padding(.bottom, margin)
         }
         .allowsHitTesting(false)
     }
@@ -345,7 +264,7 @@ struct FocusReticle: View {
     }
 }
 
-/// 曝光补偿刻度（竖直拖动取景框时出现）。
+/// 曝光补偿刻度（竖直拖动取景时出现）。
 struct ExposureScale: View {
     let value: Float
 
@@ -368,8 +287,7 @@ struct ExposureScale: View {
                     Circle()
                         .fill(Theme.amber)
                         .frame(width: 7, height: 7)
-                        .position(x: geo.size.width / 2,
-                                  y: geo.size.height * CGFloat((2 - value) / 4))
+                        .position(x: geo.size.width / 2, y: geo.size.height * CGFloat((2 - value) / 4))
                 }
                 .frame(width: 16, height: 150)
             }
@@ -414,9 +332,9 @@ struct LevelLine: View {
     var body: some View {
         let level = abs(tilt) < 1
         HStack(spacing: 0) {
-            Rectangle().frame(width: 34, height: 1)
-            Spacer().frame(width: 18)
-            Rectangle().frame(width: 34, height: 1)
+            Rectangle().frame(width: 30, height: 1)
+            Spacer().frame(width: 16)
+            Rectangle().frame(width: 30, height: 1)
         }
         .foregroundStyle(level ? Theme.amber : Color.white.opacity(0.7))
         .rotationEffect(.degrees(level ? 0 : -tilt))

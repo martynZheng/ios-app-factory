@@ -41,6 +41,8 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var isInterrupted = false
     @Published var processingCount = 0
     @Published var message: String?
+    /// 当前取景帧（已转正）的像素尺寸，用来计算取景框。
+    @Published var frameSize: CGSize = CGSize(width: 3, height: 4)
 
     let session = AVCaptureSession()
     let frames = FrameBuffer()
@@ -73,8 +75,10 @@ final class CameraModel: NSObject, ObservableObject {
         let aspect: AspectRatio
         let grainScale: Float
         let keepOriginal: Bool
+        let watermark: String?
     }
 
+    private var lastFrameSize: CGSize = .zero
     private var pending: [Int64: PendingCapture] = [:]
     private let pendingLock = NSLock()
 
@@ -307,14 +311,10 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
-    /// point: 取景框内的点；viewSize: 取景框尺寸。
-    func focus(at point: CGPoint, in viewSize: CGSize) {
-        guard let extent = frames.get()?.extent, extent.width > 0, viewSize.width > 0 else { return }
-        let scale = max(viewSize.width / extent.width, viewSize.height / extent.height)
-        let displayWidth = extent.width * scale
-        let displayHeight = extent.height * scale
-        var u = (point.x + (displayWidth - viewSize.width) / 2) / displayWidth
-        let v = (point.y + (displayHeight - viewSize.height) / 2) / displayHeight
+    /// normalized: 相机帧内的归一化坐标（左上为原点，已转正）。
+    func focus(normalized: CGPoint) {
+        var u = normalized.x
+        let v = normalized.y
         if position == .front { u = 1 - u }
 
         let devicePoint: CGPoint
@@ -345,7 +345,7 @@ final class CameraModel: NSObject, ObservableObject {
 
     // MARK: - Capture
 
-    func capture(look: FilmLook, aspect: AspectRatio, grainScale: Float, keepOriginal: Bool) {
+    func capture(look: FilmLook, aspect: AspectRatio, grainScale: Float, keepOriginal: Bool, watermark: String?) {
         guard status == .running else { return }
         let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 90
         let isFront = position == .front
@@ -374,7 +374,7 @@ final class CameraModel: NSObject, ObservableObject {
             }
 
             self.pendingLock.lock()
-            self.pending[settings.uniqueID] = PendingCapture(look: look, aspect: aspect, grainScale: grainScale, keepOriginal: keepOriginal)
+            self.pending[settings.uniqueID] = PendingCapture(look: look, aspect: aspect, grainScale: grainScale, keepOriginal: keepOriginal, watermark: watermark)
             self.pendingLock.unlock()
 
             self.photoOutput.capturePhoto(with: settings, delegate: self)
@@ -399,7 +399,13 @@ final class CameraModel: NSObject, ObservableObject {
 extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        frames.set(CIImage(cvPixelBuffer: pixelBuffer))
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+        frames.set(image)
+        let size = image.extent.size
+        if size != lastFrameSize {
+            lastFrameSize = size
+            DispatchQueue.main.async { self.frameSize = size }
+        }
     }
 }
 
@@ -412,7 +418,8 @@ extension CameraModel: AVCapturePhotoCaptureDelegate {
         }
         processingQueue.async {
             guard let result = PhotoRenderer.render(data: data, look: job.look, aspect: job.aspect,
-                                                    grainScale: job.grainScale, context: self.photoContext) else {
+                                                    grainScale: job.grainScale, watermark: job.watermark,
+                                                    context: self.photoContext) else {
                 self.finishProcessing(thumbnail: nil, error: "冲洗失败，请重试")
                 return
             }

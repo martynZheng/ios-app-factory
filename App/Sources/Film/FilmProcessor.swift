@@ -101,6 +101,10 @@ final class FilmProcessor {
         return y
     }
 
+    private static func keyed(_ x: Float, _ key: Float) -> Float {
+        clamp01(x + key * 2 * x * (1 - x))
+    }
+
     private static func transform(_ input: SIMD3<Float>, _ look: FilmLook) -> SIMD3<Float> {
         var c = input
         c.x *= 1 + 0.08 * look.warmth
@@ -126,6 +130,19 @@ final class FilmProcessor {
         let l = luma(c)
         let grey = SIMD3<Float>(repeating: l)
         c = clamp01(grey + (c - grey) * look.saturation)
+
+        // 色彩铬：越饱和的颜色压得越暗，层次更厚
+        if look.chrome > 0 {
+            let maxC = max(c.x, max(c.y, c.z))
+            let minC = min(c.x, min(c.y, c.z))
+            let sat = maxC > 0 ? (maxC - minC) / maxC : 0
+            c *= 1 - look.chrome * 0.32 * sat * sat
+        }
+
+        // 高低调：提亮/压暗中间调，黑白两端不动
+        if look.key != 0 {
+            c = SIMD3<Float>(keyed(c.x, look.key), keyed(c.y, look.key), keyed(c.z, look.key))
+        }
 
         c = SIMD3<Float>(curve(c.x, look.contrast), curve(c.y, look.contrast), curve(c.z, look.contrast))
         c = SIMD3<Float>(repeating: blacks) + c * range

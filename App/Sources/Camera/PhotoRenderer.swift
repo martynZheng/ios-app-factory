@@ -11,12 +11,15 @@ enum PhotoRenderer {
         let thumbnail: UIImage
     }
 
-    static func render(data: Data, look: FilmLook, aspect: AspectRatio, grainScale: Float, context: CIContext) -> Result? {
+    static func render(data: Data, look: FilmLook, aspect: AspectRatio, grainScale: Float, watermark: String?, context: CIContext) -> Result? {
         guard let source = CIImage(data: data, options: [.applyOrientationProperty: true]) else { return nil }
 
         var image = aspect.crop(source)
         image = image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
         image = FilmProcessor.shared.apply(look, to: image, grainScale: grainScale, seed: CGFloat.random(in: 0...4000))
+        if let watermark, !watermark.isEmpty {
+            image = Watermark.apply(watermark, to: image)
+        }
 
         let colorSpace = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
         guard let cgImage = context.createCGImage(image, from: image.extent, format: .RGBA8, colorSpace: colorSpace) else {
@@ -77,5 +80,44 @@ enum PhotoLibrary {
                 completion(success)
             })
         }
+    }
+}
+
+/// 水印：右下角一行斜体小字。尺寸按画面短边归一化，取景器里的预览（WatermarkPreview）用同样的比例。
+enum Watermark {
+    static let fontName = "Georgia-Italic"
+    static let sizeRatio: CGFloat = 0.026     // 字号 / 短边
+    static let marginRatio: CGFloat = 0.035   // 边距 / 短边
+
+    static func apply(_ text: String, to image: CIImage) -> CIImage {
+        let e = image.extent
+        let shortSide = min(e.width, e.height)
+        let fontSize = max(12, shortSide * sizeRatio)
+        let font = UIFont(name: fontName, size: fontSize) ?? UIFont.italicSystemFont(ofSize: fontSize)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: UIColor.white.withAlphaComponent(0.92),
+            .kern: fontSize * 0.03,
+        ]
+        let string = NSAttributedString(string: text, attributes: attributes)
+        let textSize = string.size()
+        let pad = fontSize * 0.6
+        let canvas = CGSize(width: ceil(textSize.width + pad * 2), height: ceil(textSize.height + pad * 2))
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        let rendered = UIGraphicsImageRenderer(size: canvas, format: format).image { context in
+            context.cgContext.setShadow(offset: .zero, blur: fontSize * 0.35,
+                                        color: UIColor.black.withAlphaComponent(0.45).cgColor)
+            string.draw(at: CGPoint(x: pad, y: pad))
+        }
+        guard let cgImage = rendered.cgImage else { return image }
+
+        let margin = shortSide * marginRatio
+        let x = e.maxX - margin - textSize.width - pad
+        let y = e.minY + margin - pad
+        let stamp = CIImage(cgImage: cgImage).transformed(by: CGAffineTransform(translationX: x, y: y))
+        return stamp.composited(over: image).cropped(to: e)
     }
 }

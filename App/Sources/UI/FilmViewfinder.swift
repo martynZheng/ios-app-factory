@@ -7,6 +7,7 @@ struct FilmViewfinder: UIViewRepresentable {
     let frames: FrameBuffer
     var look: FilmLook
     var grainScale: Float
+    var aspect: AspectRatio
 
     func makeCoordinator() -> ViewfinderRenderer {
         ViewfinderRenderer(frames: frames)
@@ -26,12 +27,14 @@ struct FilmViewfinder: UIViewRepresentable {
         view.delegate = context.coordinator
         context.coordinator.look = look
         context.coordinator.grainScale = grainScale
+        context.coordinator.aspect = aspect
         return view
     }
 
     func updateUIView(_ view: MTKView, context: Context) {
         context.coordinator.look = look
         context.coordinator.grainScale = grainScale
+        context.coordinator.aspect = aspect
     }
 }
 
@@ -39,6 +42,7 @@ final class ViewfinderRenderer: NSObject, MTKViewDelegate {
     let device: MTLDevice?
     var look: FilmLook = FilmLook.all[0]
     var grainScale: Float = 1
+    var aspect: AspectRatio = .r3x2
 
     private let frames: FrameBuffer
     private let commandQueue: MTLCommandQueue?
@@ -71,15 +75,16 @@ final class ViewfinderRenderer: NSObject, MTKViewDelegate {
         let extent = frame.extent
         guard extent.width > 0, extent.height > 0 else { return }
 
-        let scale = max(size.width / extent.width, size.height / extent.height)
-        var image = frame
-            .transformed(by: CGAffineTransform(translationX: -extent.minX, y: -extent.minY))
-            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        let scaled = image.extent
-        image = image.transformed(by: CGAffineTransform(translationX: (size.width - scaled.width) / 2,
-                                                        y: (size.height - scaled.height) / 2))
+        // 成片区域放到最大并居中，多出来的传感器画面留在四周（SwiftUI 那边会压暗）。
+        let geometry = ViewfinderGeometry(frameSize: extent.size, viewSize: size, aspect: aspect)
+        let crop = geometry.cropInFrame
+        let scale = geometry.scale
         let bounds = CGRect(origin: .zero, size: size)
-        image = image.cropped(to: bounds)
+        let image = frame
+            .transformed(by: CGAffineTransform(translationX: -extent.minX - crop.midX, y: -extent.minY - crop.midY))
+            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            .transformed(by: CGAffineTransform(translationX: size.width / 2, y: size.height / 2))
+            .cropped(to: bounds)
 
         // 颗粒每帧换一个随机偏移，取景器里会“活”起来，和真实胶片颗粒一样。
         tick = (tick + 1) % 4096
