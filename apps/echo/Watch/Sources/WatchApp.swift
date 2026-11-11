@@ -2,10 +2,13 @@ import SwiftUI
 
 @main
 struct EchoWatchApp: App {
-    @StateObject private var recorder = Recorder()
+    @StateObject private var recorder = Recorder.shared
     @StateObject private var sync = Sync.shared
 
-    init() { Sync.shared.activate() }
+    init() {
+        Sync.shared.activate()
+        Nudges.shared.setup()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -60,8 +63,12 @@ struct RecorderView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 syncStatus
-                Toggle("跳过无声分段", isOn: $recorder.skipSilence)
-                    .font(.footnote)
+                NavigationLink {
+                    ReminderSettings()
+                } label: {
+                    Label("提醒与选项", systemImage: "bell")
+                }
+                .font(.footnote)
                 Text("请在对方知情同意的情况下录音。")
                     .font(.caption2).foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -146,5 +153,45 @@ struct RecorderView: View {
         let s = Int(t)
         return s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
                          : String(format: "%02d:%02d", s / 60, s % 60)
+    }
+}
+
+struct ReminderSettings: View {
+    @EnvironmentObject private var recorder: Recorder
+    @AppStorage("morningEnabled") private var enabled = false
+    @AppStorage("morningHour") private var hour = 8
+    @AppStorage("morningMinute") private var minute = 30
+
+    private var time: Binding<Date> {
+        Binding(get: {
+            Calendar.current.date(bySettingHour: hour, minute: minute, second: 0, of: Date()) ?? Date()
+        }, set: { date in
+            let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+            hour = c.hour ?? 8
+            minute = c.minute ?? 30
+            Nudges.shared.scheduleMorning()
+        })
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("每天提醒我开始", isOn: $enabled)
+                    .onChange(of: enabled) { _, on in
+                        if on { Nudges.shared.requestAuth { Nudges.shared.scheduleMorning() } } else { Nudges.shared.scheduleMorning() }
+                    }
+                if enabled {
+                    DatePicker("时间", selection: time, displayedComponents: .hourAndMinute)
+                }
+            } footer: {
+                Text("到点手表会震动，点通知上的「开始录音」即可。录音中断或暂停太久时也会震动提醒你继续。")
+            }
+            Section {
+                Toggle("跳过无声分段", isOn: $recorder.skipSilence)
+            } footer: {
+                Text("整段 1 分钟几乎没有声音时不同步。可能误丢很小声的对话。")
+            }
+        }
+        .navigationTitle("提醒与选项")
     }
 }

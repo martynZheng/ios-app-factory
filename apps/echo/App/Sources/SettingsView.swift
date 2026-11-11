@@ -82,6 +82,10 @@ struct SettingsView: View {
             }
             if engine == "cloud" {
                 Toggle("启用云端总结", isOn: $cloudEnabled)
+                Button("填入 DeepSeek 预设") {
+                    cloudURL = "https://api.deepseek.com"
+                    cloudModel = "deepseek-chat"
+                }
                 TextField("服务地址（https://…/v1）", text: $cloudURL)
                     .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
                 TextField("模型名", text: $cloudModel)
@@ -90,7 +94,7 @@ struct SettingsView: View {
                     .onChange(of: cloudKey) { _, value in Keychain.set(value, for: "cloudKey") }
             }
         } header: {
-            Text("每日回顾")
+            Text("回顾与待办")
         } footer: {
             Text(digestFooter)
         }
@@ -163,7 +167,7 @@ struct SettingsView: View {
 
     private var aboutSection: some View {
         Section("已知限制") {
-            Text("• 手表录音必须由你在前台手动开始；被来电等打断后，需要抬腕点「继续」。\n• 转写在 iPhone 打开拾言时进行；App 在后台时系统可能暂停转写。\n• 不区分说话人，负责人只在对话里明确说出时才会填写。")
+            Text("• 手表录音必须由你在前台手动开始；被来电等打断后，需要抬腕点「继续」。\n• 录音约每分钟同步一段；手机 App 在后台时系统只给很短的处理时间，积压的内容会在你打开 App 时补上。\n• 不区分说话人，负责人只在对话里明确说出时才会填写。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }

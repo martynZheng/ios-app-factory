@@ -5,9 +5,11 @@ import WatchKit
 /// 手表录音器。
 /// - 只在用户点「开始」后录音（watchOS 要求录音必须在前台由用户发起；之后可在后台继续）。
 /// - AAC 单声道 16 kHz / 24 kbps：语音转写够用，约 11 MB/小时，编码走硬件、功耗低。
-/// - 每 2 分钟切一个分段并立即入同步队列：崩溃/没电最多丢当前分段，传输单元也小。
+/// - 每 1 分钟切一个分段并立即入同步队列：手机端大约落后 1–2 分钟就能看到文字；崩溃/没电最多丢当前分段。
 /// - 暂停 = 结束当前分段并释放麦克风（系统录音指示随之消失），不会“假暂停”。
 final class Recorder: NSObject, ObservableObject {
+    static let shared = Recorder()
+
     enum State { case idle, recording, paused }
 
     @Published var state: State = .idle
@@ -18,7 +20,7 @@ final class Recorder: NSObject, ObservableObject {
         didSet { UserDefaults.standard.set(skipSilence, forKey: "skipSilence") }
     }
 
-    static let segmentLength: TimeInterval = 120
+    static let segmentLength: TimeInterval = 60
     /// 能量门限（dBFS）。只用来丢弃“整段几乎没有声音”的分段，宁可多留也不漏对话。
     static let voiceThreshold: Float = -45
 
@@ -43,6 +45,7 @@ final class Recorder: NSObject, ObservableObject {
     func start() {
         guard state == .idle else { return }
         if let problem = precheck() { notice = problem; return }
+        Nudges.shared.requestAuth()
         AVAudioApplication.requestRecordPermission { granted in
             DispatchQueue.main.async {
                 guard granted else {
@@ -62,6 +65,7 @@ final class Recorder: NSObject, ObservableObject {
         finishSegment(discard: false)
         deactivate()
         state = .paused
+        Nudges.shared.paused()
         WKInterfaceDevice.current().play(.click)
     }
 
@@ -76,6 +80,7 @@ final class Recorder: NSObject, ObservableObject {
         if state == .recording { finishSegment(discard: false) }
         deactivate()
         state = .idle
+        Nudges.shared.clearRuntime()
         WKInterfaceDevice.current().play(.stop)
     }
 
@@ -85,6 +90,7 @@ final class Recorder: NSObject, ObservableObject {
         if state == .recording { finishSegment(discard: true) }
         deactivate()
         state = .idle
+        Nudges.shared.clearRuntime()
         Sync.shared.deleteSession(sessionID)
         WKInterfaceDevice.current().play(.failure)
         notice = "本次录音已删除"
@@ -125,6 +131,7 @@ final class Recorder: NSObject, ObservableObject {
             segmentStart = Date()
             voicedSeconds = 0
             state = .recording
+            Nudges.shared.armWatchdog()
             startTimer()
             if let haptic { WKInterfaceDevice.current().play(haptic) }
         } catch {
@@ -204,6 +211,7 @@ final class Recorder: NSObject, ObservableObject {
                 guard self.state == .recording else { return }
                 self.finishSegment(discard: false)
                 self.state = .paused
+                Nudges.shared.interrupted()
                 self.notice = "录音被系统中断，已保存到中断前。抬腕点「继续」恢复。"
                 WKInterfaceDevice.current().play(.notification)
             case .ended:

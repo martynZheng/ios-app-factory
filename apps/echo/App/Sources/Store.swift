@@ -46,6 +46,8 @@ struct Digest: Codable {
     var generatedAt: Date
     var engine: String
     var lineCount: Int
+    /// 已经整理过的转写句（增量整理用）
+    var processed: [UUID]? = nil
 }
 
 struct DB: Codable {

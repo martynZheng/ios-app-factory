@@ -18,6 +18,13 @@ enum DigestError: LocalizedError {
 enum DigestEngine {
     static var engine: String { UserDefaults.standard.string(forKey: "digestEngine") ?? "rules" }
 
+    /// 首次启动：端侧模型可用就默认用它。
+    static func chooseDefaultEngine() {
+        if UserDefaults.standard.string(forKey: "digestEngine") == nil {
+            UserDefaults.standard.set(deviceModelAvailable() ? "device" : "rules", forKey: "digestEngine")
+        }
+    }
+
     static func engineName(_ e: String) -> String {
         switch e {
         case "device": return "端侧模型"
@@ -235,5 +242,82 @@ enum DigestEngine {
             return (phrase, plus((target - current + 7) % 7))
         }
         return (phrase, nil)
+    }
+}
+
+/// 增量整理：每有新转写就只处理新增的句子并追加到当天回顾，
+/// 所以回顾和待办是随录随出的；已勾选/已写入的状态不会被覆盖。
+final class DigestCoordinator: ObservableObject {
+    static let shared = DigestCoordinator()
+
+    @Published var working = false
+    @Published var lastError: String?
+    private var observer: NSObjectProtocol?
+
+    func start() {
+        guard observer == nil else { return }
+        observer = NotificationCenter.default.addObserver(forName: .transcriptChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.updateRecent()
+        }
+        updateRecent()
+    }
+
+    func updateRecent() {
+        let today = Date()
+        update(day: Store.dayKey(today))
+        update(day: Store.dayKey(today.addingTimeInterval(-86_400)))
+    }
+
+    func unprocessedCount(day: String) -> Int {
+        let done = Set(Store.shared.db.digests[day]?.processed ?? [])
+        return Store.shared.lines(on: day).filter { !done.contains($0.id) }.count
+    }
+
+    /// full = 丢弃当天已有回顾，整天重新整理（跨段上下文更完整，但会清掉勾选状态）。
+    func update(day: String, full: Bool = false) {
+        let store = Store.shared
+        let lines = store.lines(on: day)
+        guard !lines.isEmpty, !working else { return }
+        let segments = store.segments(on: day)
+        let engine = DigestEngine.engine
+        let existing = full ? nil : store.db.digests[day]
+        // 老版本的回顾没有 processed 记录：视为全部处理过
+        let done = Set(existing.map { $0.processed ?? lines.map { $0.id } } ?? [])
+        let fresh = lines.filter { !done.contains($0.id) }
+        guard !fresh.isEmpty || existing == nil else { return }
+
+        func commit(_ items: [DigestItem]) {
+            var digest = existing ?? Digest(day: day, stats: "", items: [], generatedAt: Date(), engine: engine, lineCount: 0)
+            digest.items.append(contentsOf: items)
+            digest.stats = DigestEngine.stats(lines: lines, segments: segments)
+            digest.engine = engine
+            digest.generatedAt = Date()
+            digest.lineCount = lines.count
+            digest.processed = Array(done) + fresh.map { $0.id }
+            store.setDigest(digest)
+            Notifier.apply()
+        }
+
+        if engine == "rules" {
+            commit(DigestEngine.rules(day: day, lines: fresh, segments: segments).items)
+            return
+        }
+        working = true
+        lastError = nil
+        Task {
+            do {
+                let result = try await DigestEngine.llm(day: day, lines: fresh, segments: segments, engine: engine)
+                await MainActor.run {
+                    commit(result.items)
+                    self.working = false
+                    if self.unprocessedCount(day: day) > 0 { self.update(day: day) }
+                }
+            } catch {
+                await MainActor.run {
+                    self.lastError = error.localizedDescription
+                    self.working = false
+                }
+            }
+        }
     }
 }

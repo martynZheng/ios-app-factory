@@ -1,5 +1,6 @@
 import Foundation
 import Speech
+import UIKit
 
 /// 转写队列：一次处理一个分段。默认只用端侧识别；
 /// 只有用户在设置里明确允许后，才会在端侧不可用时使用 Apple 服务器识别。
@@ -11,6 +12,19 @@ final class Transcriber: ObservableObject {
 
     private var task: SFSpeechRecognitionTask?
     private var recognizer: SFSpeechRecognizer?
+    private var background: UIBackgroundTaskIdentifier = .invalid
+
+    /// 手表文件到达时 App 多半在后台：申请一小段后台时间把转写和整理做完。
+    private func beginBackground() {
+        guard background == .invalid else { return }
+        background = UIApplication.shared.beginBackgroundTask(withName: "transcribe") { [weak self] in self?.endBackground() }
+    }
+
+    private func endBackground() {
+        guard background != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(background)
+        background = .invalid
+    }
 
     static var localeID: String { UserDefaults.standard.string(forKey: "speechLocale") ?? "zh-CN" }
     static var allowServer: Bool { UserDefaults.standard.bool(forKey: "allowServerSpeech") }
@@ -62,6 +76,7 @@ final class Transcriber: ObservableObject {
         request.addsPunctuation = true
 
         busy = true
+        beginBackground()
         recognizer = rec
         var finished = false
         task = rec.recognitionTask(with: request) { result, error in
@@ -93,6 +108,9 @@ final class Transcriber: ObservableObject {
         busy = false
         NotificationCenter.default.post(name: .transcriptChanged, object: nil)
         kick()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20) {
+            if !self.busy && !DigestCoordinator.shared.working { self.endBackground() }
+        }
     }
 
     /// 把识别出的词按停顿和句末标点合并成句，每句带时间点。

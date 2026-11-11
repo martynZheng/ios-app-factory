@@ -11,7 +11,13 @@ struct EchoApp: App {
     @AppStorage("retentionDays") private var retentionDays = 30
     @State private var locked = UserDefaults.standard.bool(forKey: "appLock")
 
-    init() { PhoneSync.shared.activate() }
+    @StateObject private var coordinator = DigestCoordinator.shared
+
+    init() {
+        DigestEngine.chooseDefaultEngine()
+        PhoneSync.shared.activate()
+        DigestCoordinator.shared.start()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -21,6 +27,7 @@ struct EchoApp: App {
                     .environmentObject(transcriber)
                     .environmentObject(sync)
                     .environmentObject(player)
+                    .environmentObject(coordinator)
                 if appLock && locked { lockScreen }
             }
             .onChange(of: scenePhase) { _, phase in
@@ -29,6 +36,7 @@ struct EchoApp: App {
                     if appLock && locked { AppLock.unlock { ok in if ok { locked = false } } }
                     store.cleanupAudio(olderThanDays: retentionDays)
                     transcriber.kick()
+                    coordinator.updateRecent()
                 case .background:
                     if appLock { locked = true }
                     store.saveNow()
