@@ -106,9 +106,12 @@ final class Recorder: NSObject, ObservableObject {
         return nil
     }
 
+    /// 剩余空间。watchOS 上系统可能不给出真实数值（返回 0 或空），那种情况按“未知”处理，不拦录音；
+    /// 真写不进去时 AVAudioRecorder 会报错并提示。
     private func freeBytes() -> Int64 {
-        let values = try? Sync.shared.outbox.resourceValues(forKeys: [.volumeAvailableCapacityKey])
-        return values?.volumeAvailableCapacity.map { Int64($0) } ?? Int64.max
+        let attrs = try? FileManager.default.attributesOfFileSystem(forPath: Sync.shared.outbox.path)
+        let free = (attrs?[.systemFreeSize] as? NSNumber)?.int64Value ?? 0
+        return free > 0 ? free : Int64.max
     }
 
     private func beginSegment(haptic: WKHapticType?) {
