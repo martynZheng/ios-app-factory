@@ -101,6 +101,12 @@ jobs:
           if [ -d /Applications/Xcode_27.1.app ]; then sudo xcode-select -s /Applications/Xcode_27.1.app; fi
           xcodebuild -version
 
+      - name: Ensure watchOS SDK (apps with a Watch target)
+        run: |
+          if [ -d "$APP_DIR/Watch" ] && ! xcodebuild -showsdks | grep -q watchos; then
+            xcodebuild -downloadPlatform watchOS
+          fi
+
       - name: Generate Xcode project
         run: |
           brew list xcodegen >/dev/null 2>&1 || brew install xcodegen

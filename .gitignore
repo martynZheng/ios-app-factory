@@ -13,3 +13,4 @@ fastlane/README.md
 vendor/
 .bundle/
 apps/*/App/Info.plist
+apps/*/Watch/Info.plist
