@@ -10,9 +10,9 @@
 
 ## 仓库里有多个 App
 每个 App 一个目录：`apps/<name>/`（`app.env`、`project.yml`、`App/Sources`、`App/Resources`）。
-- `apps/argent` —— 银盐（胶片相机）
+- `apps/argent` —— 银盐（胶片相机）。**目前暂停（SKIP_CI=1）**，Bundle ID 被 echo 借用。
 - `apps/starmall` —— 星光百货（女性向放置经营游戏）。**目前暂停（SKIP_CI=1）**：它的 BUNDLE_ID 还是借用的 `com.deffisoan.appfactory`（归相机用）。用户注册好 `com.deffisoan.starmall` 后：改回 starmall 的 BUNDLE_ID，删掉它的 SKIP_CI。
-- `apps/echo` —— 拾言（Apple Watch + iPhone 语音记忆助手）。含 watchOS 目标：`Watch/`（手表源码）、`Shared/`（两端共用）。Bundle ID `com.deffisoan.echonote`，手表为 `.watchkitapp` 后缀。设计与限制见 `apps/echo/README.md`。只做用户主动开始、状态可见的录音，不做隐藏/后台自启录音。
+- `apps/echo` —— 拾言（Apple Watch + iPhone 语音记忆助手）。含 watchOS 目标：`Watch/`（手表源码）、`Shared/`（两端共用）。**目前借用相机的 Bundle ID `com.deffisoan.appfactory`**（本应是 `com.deffisoan.echonote`），手表为 `.watchkitapp` 后缀。同一时间只能有一个 App 用这个 ID 构建。云端模型密钥只由用户在 App 设置里填，绝不写进仓库。设计与限制见 `apps/echo/README.md`。只做用户主动开始、状态可见的录音，不做隐藏/后台自启录音。
 `app.env` 里有 `SKIP_CI=1` 的 App 不会被构建。
 push 时 CI 只构建改动过的 App（改了 `fastlane/`、`.github/` 则全部构建）。先确认用户说的是哪个 App，只改那个目录。
 
