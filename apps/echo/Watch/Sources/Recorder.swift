@@ -4,7 +4,7 @@ import WatchKit
 
 /// 手表录音器。
 /// - 只在用户点「开始」后录音（watchOS 要求录音必须在前台由用户发起；之后可在后台继续）。
-/// - AAC 单声道 16 kHz / 24 kbps：语音转写够用，约 11 MB/小时，编码走硬件、功耗低。
+/// - AAC 单声道 16 kHz / 32 kbps：约 14 MB/小时，编码走硬件、功耗低。
 /// - 每 1 分钟切一个分段并立即入同步队列：手机端大约落后 1–2 分钟就能看到文字；崩溃/没电最多丢当前分段。
 /// - 暂停 = 结束当前分段并释放麦克风（系统录音指示随之消失），不会“假暂停”。
 final class Recorder: NSObject, ObservableObject {
@@ -124,8 +124,8 @@ final class Recorder: NSObject, ObservableObject {
                 AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
                 AVSampleRateKey: 16_000,
                 AVNumberOfChannelsKey: 1,
-                AVEncoderBitRateKey: 24_000,
-                AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue,
+                AVEncoderBitRateKey: 32_000,
+                AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
             ]
             let r = try AVAudioRecorder(url: url, settings: settings)
             r.isMeteringEnabled = true

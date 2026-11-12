@@ -9,6 +9,7 @@ struct SettingsView: View {
     @AppStorage("capturePaused") private var capturePaused = false
     @AppStorage("speechLocale") private var speechLocale = "zh-CN"
     @AppStorage("allowServerSpeech") private var allowServerSpeech = false
+    @AppStorage("vocab") private var vocab = ""
     @AppStorage("digestEngine") private var engine = "rules"
     @AppStorage("cloudEnabled") private var cloudEnabled = false
     @AppStorage("cloudURL") private var cloudURL = ""
@@ -60,7 +61,10 @@ struct SettingsView: View {
                 Text("English").tag("en-US")
             }
             .onChange(of: speechLocale) { _, _ in transcriber.retryAll() }
-            LabeledContent("端侧识别", value: Transcriber.onDeviceSupported() ? "可用" : "此语言不可用")
+            LabeledContent("识别引擎", value: Transcriber.modernAvailable ? "新版端侧（SpeechAnalyzer）" : "旧版端侧")
+            TextField("常用词：人名、项目名、术语，用逗号隔开", text: $vocab, axis: .vertical)
+                .lineLimit(1...4)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
             Toggle("端侧不可用时使用 Apple 服务器", isOn: $allowServerSpeech)
                 .onChange(of: allowServerSpeech) { _, _ in transcriber.retryAll() }
         } header: {

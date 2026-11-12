@@ -75,17 +75,23 @@ enum DigestEngine {
     }
 
     private static let instructions = """
-    你是会议与日常对话的整理助手。只能依据给出的转写内容，不得补充、推测或编造任何未出现的信息。
-    每行转写前有方括号编号。请输出一个 JSON 对象，且只输出 JSON：
-    {"points":[{"text":"要点","sources":[编号]}],
-     "decisions":[{"text":"已做出的决定","sources":[编号]}],
-     "todos":[{"text":"待办事项","owner":"负责人或null","due":"截止时间原话或null","sources":[编号]}],
-     "pending":[{"text":"尚未确定、需要确认的事","sources":[编号]}]}
-    规则：每一条都必须给出 sources；owner 和 due 必须是转写里出现的原词，没有明确说就填 null；
-    拿不准是否已决定的，放进 pending 而不是 decisions；没有内容的数组留空。
+    下面是手表录音经语音识别得到的转写，识别错误很多（同音字、断句错误、漏字、把几个人的话连在一起）。
+    请先结合上下文弄懂大意，再整理。原则是宁缺毋滥：碎片、口头语、看不懂的句子一律忽略，不要逐句照搬。
+    每行转写前有方括号编号。只输出一个 JSON 对象：
+    {"points":[{"text":"","sources":[编号]}],
+     "decisions":[{"text":"","sources":[编号]}],
+     "todos":[{"text":"","owner":null,"due":null,"sources":[编号]}],
+     "pending":[{"text":"","sources":[编号]}]}
+    要求：
+    1. points：用完整通顺的句子概括这段在谈什么、得出了什么，最多 5 条。可以修正明显的识别错字，但不得加入转写里没有的事实。
+    2. decisions：只收明确说出“已经定下来”的事。
+    3. todos：只收明确要某人去做的具体事情（有动作、有对象），text 写成“做什么”的完整句子。owner、due 必须是转写里出现的原词，没有明确说就填 null。
+    4. pending：只收明确提出但没有结论、需要后续确认的具体问题，写成完整的一句话，最多 3 条。
+    5. 每条 text 不少于 8 个字，必须能脱离上下文看懂；每条必须给 sources（只能用【本段转写】里的编号）。
+    6. 如果这段内容听不出任何有意义的信息，四个数组都留空。
     """
 
-    static func llm(day: String, lines: [Line], segments: [Segment], engine: String) async throws -> Digest {
+    static func llm(day: String, lines: [Line], segments: [Segment], engine: String, context: String = "") async throws -> Digest {
         let chunkLimit = engine == "device" ? 1400 : 9000
         let time = DateFormatter()
         time.dateFormat = "HH:mm"
@@ -103,11 +109,12 @@ enum DigestEngine {
 
         var items: [DigestItem] = []
         for chunk in chunks {
+            let prompt = (context.isEmpty ? "" : "【上文，仅供理解，不要从中提取】\n\(context)\n\n") + "【本段转写】\n" + chunk
             let raw: String
             if engine == "device" {
-                raw = try await deviceRespond(chunk)
+                raw = try await deviceRespond(prompt)
             } else {
-                raw = try await cloudRespond(chunk)
+                raw = try await cloudRespond(prompt)
             }
             items.append(contentsOf: parse(raw, lines: lines))
         }
@@ -173,7 +180,7 @@ enum DigestEngine {
         for (key, kind) in groups {
             guard let array = obj[key] as? [[String: Any]] else { continue }
             for entry in array {
-                guard let text = (entry["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { continue }
+                guard let text = (entry["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), text.count >= 6 else { continue }
                 let numbers = (entry["sources"] as? [Any] ?? []).compactMap { ($0 as? Int) ?? Int("\($0)") }
                 let valid = numbers.filter { lines.indices.contains($0) }
                 guard !valid.isEmpty else { continue }
@@ -273,8 +280,16 @@ final class DigestCoordinator: ObservableObject {
         return Store.shared.lines(on: day).filter { !done.contains($0.id) }.count
     }
 
-    /// full = 丢弃当天已有回顾，整天重新整理（跨段上下文更完整，但会清掉勾选状态）。
-    func update(day: String, full: Bool = false) {
+    /// 新内容要攒够一段再交给模型：碎片逐句整理只会得到碎片。
+    /// 条件：新增 ≥ 1200 字，或最后一句已经过去 5 分钟（这段对话结束了）。
+    func readyToProcess(_ fresh: [Line]) -> Bool {
+        guard let last = fresh.last else { return false }
+        let chars = fresh.reduce(0) { $0 + $1.text.count }
+        return chars >= 1200 || Date().timeIntervalSince(last.time) > 300
+    }
+
+    /// full = 丢弃当天已有回顾，整天重新整理；force = 不等攒够，现在就整理新增内容。
+    func update(day: String, full: Bool = false, force: Bool = false) {
         let store = Store.shared
         let lines = store.lines(on: day)
         guard !lines.isEmpty, !working else { return }
@@ -284,7 +299,9 @@ final class DigestCoordinator: ObservableObject {
         // 老版本的回顾没有 processed 记录：视为全部处理过
         let done = Set(existing.map { $0.processed ?? lines.map { $0.id } } ?? [])
         let fresh = lines.filter { !done.contains($0.id) }
-        guard !fresh.isEmpty || existing == nil else { return }
+        guard !fresh.isEmpty else { return }
+        if engine != "rules" && !full && !force && !readyToProcess(fresh) { return }
+        let context = lines.filter { done.contains($0.id) }.suffix(8).map { $0.text }.joined(separator: "\n")
 
         func commit(_ items: [DigestItem]) {
             var digest = existing ?? Digest(day: day, stats: "", items: [], generatedAt: Date(), engine: engine, lineCount: 0)
@@ -306,7 +323,7 @@ final class DigestCoordinator: ObservableObject {
         lastError = nil
         Task {
             do {
-                let result = try await DigestEngine.llm(day: day, lines: fresh, segments: segments, engine: engine)
+                let result = try await DigestEngine.llm(day: day, lines: fresh, segments: segments, engine: engine, context: context)
                 await MainActor.run {
                     commit(result.items)
                     self.working = false

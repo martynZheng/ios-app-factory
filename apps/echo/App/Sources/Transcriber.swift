@@ -1,9 +1,13 @@
+import AVFoundation
+import CoreMedia
 import Foundation
 import Speech
 import UIKit
 
-/// 转写队列：一次处理一个分段。默认只用端侧识别；
-/// 只有用户在设置里明确允许后，才会在端侧不可用时使用 Apple 服务器识别。
+/// 转写队列：一次处理一个分段，全部在本机完成。
+/// - iOS 26+：用新的 SpeechAnalyzer / SpeechTranscriber（长音频、远场拾音明显更好）。
+/// - 新引擎不可用或出错时：退回旧的 SFSpeechRecognizer 端侧识别。
+/// - 只有用户明确允许时，才会在端侧完全不可用的情况下使用 Apple 服务器。
 final class Transcriber: ObservableObject {
     static let shared = Transcriber()
 
@@ -14,7 +18,26 @@ final class Transcriber: ObservableObject {
     private var recognizer: SFSpeechRecognizer?
     private var background: UIBackgroundTaskIdentifier = .invalid
 
-    /// 手表文件到达时 App 多半在后台：申请一小段后台时间把转写和整理做完。
+    static var localeID: String { UserDefaults.standard.string(forKey: "speechLocale") ?? "zh-CN" }
+    static var allowServer: Bool { UserDefaults.standard.bool(forKey: "allowServerSpeech") }
+
+    /// 用户填的常用词（人名、项目名、术语），帮助识别。
+    static var vocabulary: [String] {
+        let raw = UserDefaults.standard.string(forKey: "vocab") ?? ""
+        return raw.components(separatedBy: CharacterSet(charactersIn: ",，、;；\n "))
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    static func onDeviceSupported() -> Bool {
+        SFSpeechRecognizer(locale: Locale(identifier: localeID))?.supportsOnDeviceRecognition ?? false
+    }
+
+    static var modernAvailable: Bool {
+        if #available(iOS 26.0, *) { return true }
+        return false
+    }
+
     private func beginBackground() {
         guard background == .invalid else { return }
         background = UIApplication.shared.beginBackgroundTask(withName: "transcribe") { [weak self] in self?.endBackground() }
@@ -26,13 +49,6 @@ final class Transcriber: ObservableObject {
         background = .invalid
     }
 
-    static var localeID: String { UserDefaults.standard.string(forKey: "speechLocale") ?? "zh-CN" }
-    static var allowServer: Bool { UserDefaults.standard.bool(forKey: "allowServerSpeech") }
-
-    static func onDeviceSupported() -> Bool {
-        SFSpeechRecognizer(locale: Locale(identifier: localeID))?.supportsOnDeviceRecognition ?? false
-    }
-
     /// 设置变更后，把之前被挡住/失败的分段重新排队。
     func retryAll() {
         Store.shared.mutate { db in
@@ -40,6 +56,21 @@ final class Transcriber: ObservableObject {
                 db.segments[i].status = .pending
                 db.segments[i].error = nil
             }
+        }
+        kick()
+    }
+
+    /// 用当前引擎把某一天还留着音频的分段全部重新转写（旧文字和当天回顾会被替换）。
+    func retranscribe(day: String) {
+        let ids = Set(Store.shared.segments(on: day).filter { $0.hasAudio }.map { $0.id })
+        guard !ids.isEmpty else { return }
+        Store.shared.mutate { db in
+            db.lines.removeAll { ids.contains($0.segmentID) }
+            for i in db.segments.indices where ids.contains(db.segments[i].id) {
+                db.segments[i].status = .pending
+                db.segments[i].error = nil
+            }
+            db.digests[day] = nil
         }
         kick()
     }
@@ -59,24 +90,52 @@ final class Transcriber: ObservableObject {
             return
         }
 
-        guard let rec = SFSpeechRecognizer(locale: Locale(identifier: Self.localeID)), rec.isAvailable else { return }
+        busy = true
+        beginBackground()
+        if #available(iOS 26.0, *) {
+            let url = Store.shared.audioURL(seg.id)
+            let localeID = Self.localeID
+            let vocab = Self.vocabulary
+            Task {
+                do {
+                    let lines = try await ModernSpeech.transcribe(url: url, segment: seg, localeID: localeID, vocabulary: vocab)
+                    await MainActor.run {
+                        Store.shared.setLines(lines, for: seg.id)
+                        Store.shared.updateSegment(seg.id) { $0.status = lines.isEmpty ? .noSpeech : .done; $0.error = nil }
+                        self.finish()
+                    }
+                } catch {
+                    let reason = error.localizedDescription
+                    await MainActor.run { self.legacy(seg, note: "新引擎不可用（\(reason)），已改用旧引擎") }
+                }
+            }
+        } else {
+            legacy(seg, note: nil)
+        }
+    }
+
+    // MARK: 旧引擎
+
+    private func legacy(_ seg: Segment, note: String?) {
+        guard let rec = SFSpeechRecognizer(locale: Locale(identifier: Self.localeID)), rec.isAvailable else {
+            Store.shared.updateSegment(seg.id) { $0.status = .failed; $0.error = note ?? "语音识别暂不可用" }
+            finish()
+            return
+        }
         let onDevice = rec.supportsOnDeviceRecognition
         if !onDevice && !Self.allowServer {
             Store.shared.updateSegment(seg.id) {
                 $0.status = .blocked
                 $0.error = "该语言在这台设备上不支持端侧识别。可在设置中允许使用 Apple 服务器转写。"
             }
-            DispatchQueue.main.async { self.kick() }
+            finish()
             return
         }
-
         let request = SFSpeechURLRecognitionRequest(url: Store.shared.audioURL(seg.id))
         request.requiresOnDeviceRecognition = onDevice
         request.shouldReportPartialResults = false
         request.addsPunctuation = true
-
-        busy = true
-        beginBackground()
+        request.contextualStrings = Self.vocabulary
         recognizer = rec
         var finished = false
         task = rec.recognitionTask(with: request) { result, error in
@@ -86,7 +145,7 @@ final class Transcriber: ObservableObject {
                     finished = true
                     let lines = Self.makeLines(result.bestTranscription, segment: seg)
                     Store.shared.setLines(lines, for: seg.id)
-                    Store.shared.updateSegment(seg.id) { $0.status = lines.isEmpty ? .noSpeech : .done; $0.error = nil }
+                    Store.shared.updateSegment(seg.id) { $0.status = lines.isEmpty ? .noSpeech : .done; $0.error = note }
                     self.finish()
                 } else if let error {
                     finished = true
@@ -94,7 +153,7 @@ final class Transcriber: ObservableObject {
                     let noSpeech = ns.code == 1110 || ns.localizedDescription.lowercased().contains("no speech")
                     Store.shared.updateSegment(seg.id) {
                         $0.status = noSpeech ? .noSpeech : .failed
-                        $0.error = noSpeech ? nil : ns.localizedDescription
+                        $0.error = noSpeech ? note : ns.localizedDescription
                     }
                     self.finish()
                 }
@@ -146,6 +205,55 @@ final class Transcriber: ObservableObject {
             }
         }
         return lines
+    }
+}
+
+// MARK: 新引擎（iOS 26+）
+
+@available(iOS 26.0, *)
+enum ModernSpeech {
+    struct Unsupported: LocalizedError {
+        var errorDescription: String? { "所选语言暂不支持" }
+    }
+
+    private static func collect(_ transcriber: SpeechTranscriber) async throws -> [(Double, String)] {
+        var out: [(Double, String)] = []
+        for try await result in transcriber.results {
+            let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { out.append((result.range.start.seconds, text)) }
+        }
+        return out
+    }
+
+    static func transcribe(url: URL, segment: Segment, localeID: String, vocabulary: [String]) async throws -> [Line] {
+        guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: localeID)) else {
+            throw Unsupported()
+        }
+        let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [],
+                                            attributeOptions: [.audioTimeRange])
+        // 首次使用会下载该语言的端侧模型
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            try await request.downloadAndInstall()
+        }
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        if !vocabulary.isEmpty {
+            let context = AnalysisContext()
+            context.contextualStrings[.general] = vocabulary
+            try await analyzer.setContext(context)
+        }
+        let file = try AVAudioFile(forReading: url)
+        async let collected = collect(transcriber)
+        if let last = try await analyzer.analyzeSequence(from: file) {
+            try await analyzer.finalizeAndFinish(through: last)
+        } else {
+            await analyzer.cancelAndFinishNow()
+        }
+        let parts = try await collected
+        return parts.map { offset, text in
+            let safe = offset.isFinite ? max(0, offset) : 0
+            return Line(id: UUID(), segmentID: segment.id, time: segment.start.addingTimeInterval(safe),
+                        offset: safe, text: text, edited: false)
+        }
     }
 }
 
