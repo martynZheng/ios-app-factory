@@ -19,10 +19,9 @@ shot() { local name="$1"; shift
   xcrun simctl terminate "$DEV" "$BUNDLE_ID" >/dev/null 2>&1 || true
   xcrun simctl launch "$DEV" "$BUNDLE_ID" -demo 1 "$@" >/dev/null
   sleep 7
-  # iPhone Duo 模拟器有两块屏：1=外屏，3=内屏
+  # iPhone Duo 模拟器有两块屏：1=外屏，3=内屏（合上时内屏是黑的，命令行暂时没法展开，宽屏布局未能截图验证）
   if ! xcrun simctl io "$DEV" screenshot "$OUT/$name.png" >/dev/null 2>&1; then
     xcrun simctl io "$DEV" screenshot --display=1 "$OUT/$name.png" >/dev/null 2>&1 || true
-    xcrun simctl io "$DEV" screenshot --display=3 "$OUT/$name-inner.png" >/dev/null 2>&1 || true
   fi; }
 shot today
 shot chapter -chapter 1

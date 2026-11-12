@@ -38,12 +38,12 @@ enum Demo {
             db.lines = lines
             db.dayContext = [day: ""]
         }
-        let first = Array(lines[0..<9])
-        let second = Array(lines[9...])
+        let first = Array(lines[0..<8])
+        let second = Array(lines[8...])
         let json1 = """
         {"scene":"AI 实战挑战赛决赛路演，我在主持","chapters":[
         {"title":"开场：六支队伍决赛路演","speaker":null,"summary":"主持人开场，说明今天六支队伍路演，每队十分钟讲解加五分钟问答。","continues":false,"sources":[0,1,2],"points":[{"text":"每队十分钟讲解加五分钟问答","sources":[1]}]},
-        {"title":"二号选手：告警自闭环助手小美","speaker":"二号选手","summary":"云业务增长让监控告警处理越来越慢，团队沉淀 34 个技能，让助手小美自主解析并处理告警。","continues":false,"sources":[3,4,5,6,7,8],"points":[
+        {"title":"二号选手：告警自闭环助手小美","speaker":"二号选手","summary":"云业务增长让监控告警处理越来越慢，团队沉淀 34 个技能，让助手小美自主解析并处理告警。","continues":false,"sources":[3,4,5,6,7],"points":[
           {"text":"多地同时告警时响应处置耗时明显增加","sources":[4]},
           {"text":"沉淀了 34 个技能供助手调用","sources":[5]},
           {"text":"小美会解析故障位置和机器 SN，获取日志后自主制定恢复方案","sources":[6]}]}],
