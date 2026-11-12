@@ -262,3 +262,9 @@ final class Store: ObservableObject {
         } catch { return nil }
     }
 }
+
+extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
