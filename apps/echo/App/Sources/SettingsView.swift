@@ -10,6 +10,7 @@ struct SettingsView: View {
     @AppStorage("speechLocale") private var speechLocale = "zh-CN"
     @AppStorage("allowServerSpeech") private var allowServerSpeech = false
     @AppStorage("vocab") private var vocab = ""
+    @AppStorage("aboutMe") private var aboutMe = ""
     @AppStorage("digestEngine") private var engine = "rules"
     @AppStorage("cloudEnabled") private var cloudEnabled = false
     @AppStorage("cloudURL") private var cloudURL = ""
@@ -76,6 +77,8 @@ struct SettingsView: View {
 
     private var digestSection: some View {
         Section {
+            TextField("关于我：名字、角色，如：汯毅，供应链 AI 负责人", text: $aboutMe, axis: .vertical)
+                .lineLimit(1...3)
             Picker("总结方式", selection: $engine) {
                 Text("规则提取（本机）").tag("rules")
                 Text("端侧模型（本机）").tag("device")

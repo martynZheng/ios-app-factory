@@ -16,6 +16,7 @@ struct EchoApp: App {
     init() {
         DigestEngine.chooseDefaultEngine()
         PhoneSync.shared.activate()
+        if Store.isDemo { Demo.seed() }
         DigestCoordinator.shared.start()
     }
 
@@ -63,17 +64,18 @@ struct EchoApp: App {
 
 struct RootView: View {
     @State private var showSettings = false
+    @State private var selection = Store.isDemo ? UserDefaults.standard.integer(forKey: "tab") : 0
 
     var body: some View {
-        TabView {
-            tab("今日回顾", "sun.max") { TodayView() }
-            tab("时间线", "text.alignleft") { TranscriptView() }
-            tab("待办", "checklist") { TodosView() }
+        TabView(selection: $selection) {
+            tab(0, "今日回顾", "sun.max") { TodayView() }
+            tab(1, "时间线", "text.alignleft") { TranscriptView() }
+            tab(2, "待办", "checklist") { TodosView() }
         }
         .sheet(isPresented: $showSettings) { SettingsView() }
     }
 
-    private func tab<V: View>(_ title: String, _ symbol: String, @ViewBuilder content: () -> V) -> some View {
+    private func tab<V: View>(_ index: Int, _ title: String, _ symbol: String, @ViewBuilder content: () -> V) -> some View {
         NavigationStack {
             content()
                 .navigationTitle(title)
@@ -85,6 +87,7 @@ struct RootView: View {
                 }
         }
         .tabItem { Label(title, systemImage: symbol) }
+        .tag(index)
     }
 }
 

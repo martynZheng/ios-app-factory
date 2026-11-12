@@ -139,3 +139,36 @@ jobs:
             ${{ env.APP_DIR }}/build/**/*.log
             ~/Library/Logs/gym/
           if-no-files-found: ignore
+
+  # 界面自查：有 preview.sh 的 App 会在模拟器里用演示数据截图，推到 ci-screenshots 分支供 Claude 查看。
+  preview:
+    needs: detect
+    if: needs.detect.outputs.apps != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.detect.outputs.apps) }}
+    runs-on: xcode-27
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      APP_DIR: apps/${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Screenshots
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [ -f "$APP_DIR/preview.sh" ] || { echo "no preview.sh"; exit 0; }
+          set -a; . <(grep -E '^[A-Z_]+=' "$APP_DIR/app.env"); set +a
+          if [ -d /Applications/Xcode_27.1.app ]; then sudo xcode-select -s /Applications/Xcode_27.1.app; fi
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          OUT="$RUNNER_TEMP/shots/${{ matrix.app }}"
+          bash "$APP_DIR/preview.sh" "$OUT"
+          cd "$RUNNER_TEMP/shots"
+          git init -q -b ci-screenshots
+          git config user.name ci; git config user.email ci@users.noreply.github.com
+          echo "$GITHUB_SHA" > COMMIT
+          git add -A && git commit -qm "screenshots for $GITHUB_SHA"
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" ci-screenshots

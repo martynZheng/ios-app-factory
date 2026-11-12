@@ -74,55 +74,38 @@ enum DigestEngine {
         return false
     }
 
-    private static let instructions = """
-    下面是手表录音经语音识别得到的转写，识别错误很多（同音字、断句错误、漏字、把几个人的话连在一起）。
-    请先结合上下文弄懂大意，再整理。原则是宁缺毋滥：碎片、口头语、看不懂的句子一律忽略，不要逐句照搬。
+    static let instructions = """
+    你在帮“我”整理随身录音的转写。录音来自手表，语音识别错误很多（同音字、断句错、漏字），而且分不清是谁在说话：
+    可能是我在说，也可能是我在听别人演讲、汇报、路演、开会，或者只是周围的背景声音。
+    请先判断这是什么场合，再按话题分章整理。原则是宁缺毋滥，看不懂的碎片一律忽略。
     每行转写前有方括号编号。只输出一个 JSON 对象：
-    {"points":[{"text":"","sources":[编号]}],
+    {"scene":"",
+     "chapters":[{"title":"","speaker":null,"summary":"","continues":false,"sources":[编号],"points":[{"text":"","sources":[编号]}]}],
      "decisions":[{"text":"","sources":[编号]}],
      "todos":[{"text":"","owner":null,"due":null,"sources":[编号]}],
      "pending":[{"text":"","sources":[编号]}]}
     要求：
-    1. points：用完整通顺的句子概括这段在谈什么、得出了什么，最多 5 条。可以修正明显的识别错字，但不得加入转写里没有的事实。
-    2. decisions：只收明确说出“已经定下来”的事。
-    3. todos：只收明确要某人去做的具体事情（有动作、有对象），text 写成“做什么”的完整句子。owner、due 必须是转写里出现的原词，没有明确说就填 null。
-    4. pending：只收明确提出但没有结论、需要后续确认的具体问题，写成完整的一句话，最多 3 条。
-    5. 每条 text 不少于 8 个字，必须能脱离上下文看懂；每条必须给 sources（只能用【本段转写】里的编号）。
-    6. 如果这段内容听不出任何有意义的信息，四个数组都留空。
+    1. scene：一句话说明这是什么场合、我大概是什么角色（例如“AI 大赛决赛路演，我在主持并旁听”）。如果【背景】里我已经写明，以我写的为准；实在看不出就留空。
+    2. chapters：按时间顺序把【本段转写】分成 1–4 章，每章是一个完整话题。比赛、路演、分享会里，一位选手/讲者或一个项目算一章。
+       title 不超过 14 个字，写具体内容（如“3 号选手：告警自闭环助手”），不要写“讨论”“内容”这类空话。
+       speaker 填转写里出现的讲者称呼（如“2 号选手”“老张”），没有就 null。
+       summary 用 1–2 句通顺的话概括这一章讲了什么、结论是什么；可以修正明显的识别错字，但不得加入转写里没有的事实。
+       points 最多 4 条，每条是一个具体的信息点（数字、做法、结论），不要重复 summary。
+       sources 列出属于这一章的编号。
+       如果第一章明显是【上一章】的继续，把它的 continues 设为 true，summary 写成整章到目前为止的概括。
+    3. todos：只收明确需要“我”或在场某个具体的人会后去做的事。演讲者介绍他们的方案、系统会做什么、未来规划，都不是待办。
+       owner、due 必须是转写里出现的原词，否则 null。
+    4. decisions：只收明确说出“已经定下来”的事。pending：只收明确提出、没有结论、需要我后续确认的具体问题，最多 2 条。
+       旁听别人演讲时，这三类通常是空的，留空数组即可。
+    5. 每条 text 不少于 8 个字，能脱离上下文看懂；所有 sources 只能用【本段转写】里的编号。
     """
 
-    static func llm(day: String, lines: [Line], segments: [Segment], engine: String, context: String = "") async throws -> Digest {
-        let chunkLimit = engine == "device" ? 1400 : 9000
-        let time = DateFormatter()
-        time.dateFormat = "HH:mm"
-        var chunks: [String] = []
-        var current = ""
-        for (i, line) in lines.enumerated() {
-            let row = "[\(i)] \(time.string(from: line.time)) \(line.text)\n"
-            if current.count + row.count > chunkLimit, !current.isEmpty {
-                chunks.append(current)
-                current = ""
-            }
-            current += row
-        }
-        if !current.isEmpty { chunks.append(current) }
-
-        var items: [DigestItem] = []
-        for chunk in chunks {
-            let prompt = (context.isEmpty ? "" : "【上文，仅供理解，不要从中提取】\n\(context)\n\n") + "【本段转写】\n" + chunk
-            let raw: String
-            if engine == "device" {
-                raw = try await deviceRespond(prompt)
-            } else {
-                raw = try await cloudRespond(prompt)
-            }
-            items.append(contentsOf: parse(raw, lines: lines))
-        }
-        return Digest(day: day, stats: stats(lines: lines, segments: segments), items: items,
-                      generatedAt: Date(), engine: engine, lineCount: lines.count)
+    static func respond(engine: String, prompt: String) async throws -> String {
+        if engine == "device" { return try await deviceRespond(prompt) }
+        return try await cloudRespond(prompt)
     }
 
-    private static func deviceRespond(_ prompt: String) async throws -> String {
+    static func deviceRespond(_ prompt: String) async throws -> String {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *) {
             guard deviceModelAvailable() else { throw DigestError.unavailable("这台设备上的端侧模型暂不可用（需要系统支持 Apple 智能并已下载模型）。") }
@@ -134,7 +117,7 @@ enum DigestEngine {
         throw DigestError.unavailable("端侧模型需要 iOS 26 及以上系统。")
     }
 
-    private static func cloudRespond(_ prompt: String) async throws -> String {
+    static func cloudRespond(_ prompt: String) async throws -> String {
         let d = UserDefaults.standard
         guard d.bool(forKey: "cloudEnabled") else { throw DigestError.unavailable("云端总结未启用。") }
         let base = (d.string(forKey: "cloudURL") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -170,33 +153,97 @@ enum DigestEngine {
         return content
     }
 
-    /// 解析并校验模型输出：没有有效来源的条目丢弃；负责人/截止时间不在来源原文中则清空。
-    static func parse(_ raw: String, lines: [Line]) -> [DigestItem] {
+    struct ParsedChapter {
+        var title: String
+        var speaker: String?
+        var summary: String
+        var continues: Bool
+        var lineIdx: [Int]
+        var points: [DigestItem]
+    }
+
+    struct Block {
+        var scene: String = ""
+        var chapters: [ParsedChapter] = []
+        var others: [DigestItem] = []
+    }
+
+    private static func ints(_ any: Any?, valid: Range<Int>) -> [Int] {
+        let raw = (any as? [Any] ?? []).compactMap { ($0 as? Int) ?? Int("\($0)") }
+        var seen = Set<Int>()
+        return raw.filter { valid.contains($0) && seen.insert($0).inserted }
+    }
+
+    private static func clean(_ any: Any?) -> String {
+        let s = (any as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return s.lowercased() == "null" ? "" : s
+    }
+
+    /// 解析并校验模型输出。没有有效来源的章节/条目丢弃；负责人、截止时间、讲者不在来源原文中出现则清空。
+    static func parseBlock(_ raw: String, lines: [Line]) -> Block {
+        var block = Block()
         guard let s = raw.firstIndex(of: "{"), let e = raw.lastIndex(of: "}"), s < e,
               let data = String(raw[s...e]).data(using: .utf8),
-              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [] }
-        var out: [DigestItem] = []
-        let groups: [(String, ItemKind)] = [("points", .point), ("decisions", .decision), ("todos", .todo), ("pending", .pending)]
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return block }
+        let valid = 0..<lines.count
+        block.scene = String(clean(obj["scene"]).prefix(60))
+
+        func item(_ entry: [String: Any], kind: ItemKind) -> DigestItem? {
+            let text = clean(entry["text"])
+            let src = ints(entry["sources"], valid: valid)
+            guard text.count >= 6, !src.isEmpty else { return nil }
+            let cited = src.map { lines[$0].text }.joined(separator: " ")
+            var owner: String? = clean(entry["owner"])
+            if owner == "" || !cited.contains(owner ?? "") { owner = nil }
+            var due: String? = clean(entry["due"])
+            if due == "" || !cited.contains(due ?? "") { due = nil }
+            var dueDate: Date?
+            if kind == .todo, let d = due { dueDate = parseDue(d, base: lines[src[0]].time)?.1 }
+            return DigestItem(id: UUID(), kind: kind, text: text, owner: kind == .todo ? owner : nil,
+                              due: kind == .todo ? due : nil, dueDate: dueDate,
+                              sourceLineIDs: src.map { lines[$0].id }, done: false, exported: false)
+        }
+
+        for (i, entry) in (obj["chapters"] as? [[String: Any]] ?? []).enumerated() {
+            let title = clean(entry["title"])
+            let src = ints(entry["sources"], valid: valid)
+            guard !title.isEmpty, !src.isEmpty else { continue }
+            let all = lines.map { $0.text }.joined(separator: " ")
+            var speaker: String? = clean(entry["speaker"])
+            if speaker == "" || !all.contains(speaker ?? "") { speaker = nil }
+            let points = (entry["points"] as? [[String: Any]] ?? []).compactMap { item($0, kind: .point) }.prefix(4)
+            block.chapters.append(ParsedChapter(title: String(title.prefix(24)), speaker: speaker, summary: clean(entry["summary"]),
+                                                continues: i == 0 && (entry["continues"] as? Bool ?? false),
+                                                lineIdx: src, points: Array(points)))
+        }
+        let groups: [(String, ItemKind)] = [("decisions", .decision), ("todos", .todo), ("pending", .pending)]
         for (key, kind) in groups {
-            guard let array = obj[key] as? [[String: Any]] else { continue }
-            for entry in array {
-                guard let text = (entry["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), text.count >= 6 else { continue }
-                let numbers = (entry["sources"] as? [Any] ?? []).compactMap { ($0 as? Int) ?? Int("\($0)") }
-                let valid = numbers.filter { lines.indices.contains($0) }
-                guard !valid.isEmpty else { continue }
-                let cited = valid.map { lines[$0].text }.joined(separator: " ")
-                var owner = (entry["owner"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let o = owner, o.isEmpty || o.lowercased() == "null" || !cited.contains(o) { owner = nil }
-                var due = (entry["due"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let d = due, d.isEmpty || d.lowercased() == "null" || !cited.contains(d) { due = nil }
-                var dueDate: Date?
-                if kind == .todo, let d = due { dueDate = parseDue(d, base: lines[valid[0]].time)?.1 }
-                out.append(DigestItem(id: UUID(), kind: kind, text: text, owner: kind == .todo ? owner : nil,
-                                      due: kind == .todo ? due : nil, dueDate: dueDate,
-                                      sourceLineIDs: valid.map { lines[$0].id }, done: false, exported: false))
+            for entry in obj[key] as? [[String: Any]] ?? [] {
+                if let it = item(entry, kind: kind) { block.others.append(it) }
             }
         }
-        return out
+        return block
+    }
+
+    /// 规则引擎的分章：按 5 分钟以上的停顿切开，不生成任何概括。
+    static func rulesBlock(lines: [Line]) -> Block {
+        var block = Block()
+        let time = DateFormatter()
+        time.dateFormat = "HH:mm"
+        var current: [Int] = []
+        func flush() {
+            guard let first = current.first else { return }
+            block.chapters.append(ParsedChapter(title: "\(time.string(from: lines[first].time)) 的对话", speaker: nil,
+                                                summary: "", continues: false, lineIdx: current, points: []))
+            current = []
+        }
+        for i in lines.indices {
+            if let last = current.last, lines[i].time.timeIntervalSince(lines[last].time) > 300 { flush() }
+            current.append(i)
+        }
+        flush()
+        block.others = rules(day: "", lines: lines, segments: []).items
+        return block
     }
 
     // MARK: 截止时间
@@ -252,8 +299,8 @@ enum DigestEngine {
     }
 }
 
-/// 增量整理：每有新转写就只处理新增的句子并追加到当天回顾，
-/// 所以回顾和待办是随录随出的；已勾选/已写入的状态不会被覆盖。
+/// 增量整理：新内容攒够一段就交给模型，按话题分章并追加到当天的鱼骨图上；
+/// 已勾选/已写入的状态不会被覆盖。
 final class DigestCoordinator: ObservableObject {
     static let shared = DigestCoordinator()
 
@@ -275,66 +322,140 @@ final class DigestCoordinator: ObservableObject {
         update(day: Store.dayKey(today.addingTimeInterval(-86_400)))
     }
 
-    func unprocessedCount(day: String) -> Int {
-        let done = Set(Store.shared.db.digests[day]?.processed ?? [])
-        return Store.shared.lines(on: day).filter { !done.contains($0.id) }.count
+    private func fresh(day: String) -> [Line] {
+        let lines = Store.shared.lines(on: day)
+        guard let digest = Store.shared.db.digests[day] else { return lines }
+        let done = Set(digest.processed ?? lines.map { $0.id })
+        return lines.filter { !done.contains($0.id) }
     }
 
+    func unprocessedCount(day: String) -> Int { fresh(day: day).count }
+
     /// 新内容要攒够一段再交给模型：碎片逐句整理只会得到碎片。
-    /// 条件：新增 ≥ 1200 字，或最后一句已经过去 5 分钟（这段对话结束了）。
     func readyToProcess(_ fresh: [Line]) -> Bool {
         guard let last = fresh.last else { return false }
         let chars = fresh.reduce(0) { $0 + $1.text.count }
         return chars >= 1200 || Date().timeIntervalSince(last.time) > 300
     }
 
+    private func context(day: String) -> String {
+        let store = Store.shared
+        var parts: [String] = []
+        let me = (UserDefaults.standard.string(forKey: "aboutMe") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !me.isEmpty { parts.append("【关于我】\(me)") }
+        let bg = (store.db.dayContext?[day] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !bg.isEmpty { parts.append("【背景（我自己写的，以此为准）】\(bg)") }
+        if let digest = store.db.digests[day] {
+            if let scene = digest.scene, !scene.isEmpty { parts.append("【之前判断的场合】\(scene)") }
+            if let last = digest.chapters?.last { parts.append("【上一章】标题：\(last.title)；概括：\(last.summary)") }
+            let done = Set(digest.processed ?? [])
+            let tail = store.lines(on: day).filter { done.contains($0.id) }.suffix(6).map { $0.text }.joined(separator: "\n")
+            if !tail.isEmpty { parts.append("【上文最后几句，仅供理解，不要从中提取】\n\(tail)") }
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    /// 把一段的整理结果并入当天回顾。
+    func merge(_ block: DigestEngine.Block, chunk: [Line], day: String, engine: String) {
+        let store = Store.shared
+        let lines = store.lines(on: day)
+        var digest = store.db.digests[day] ?? Digest(day: day, stats: "", items: [], generatedAt: Date(), engine: engine, lineCount: 0)
+        var chapters = digest.chapters ?? []
+        for parsed in block.chapters {
+            let own = parsed.lineIdx.map { chunk[$0] }
+            guard let start = own.map({ $0.time }).min(), let end = own.map({ $0.time }).max() else { continue }
+            let chapterID: UUID
+            if parsed.continues, var last = chapters.last {
+                last.end = max(last.end, end)
+                last.sourceLineIDs += own.map { $0.id }
+                if !parsed.summary.isEmpty { last.summary = parsed.summary }
+                chapters[chapters.count - 1] = last
+                chapterID = last.id
+            } else {
+                let chapter = Chapter(id: UUID(), title: parsed.title, summary: parsed.summary, speaker: parsed.speaker,
+                                      start: start, end: end, sourceLineIDs: own.map { $0.id })
+                chapters.append(chapter)
+                chapterID = chapter.id
+            }
+            for var point in parsed.points {
+                point.chapterID = chapterID
+                digest.items.append(point)
+            }
+        }
+        for var other in block.others {
+            if let first = other.sourceLineIDs.first, let time = chunk.first(where: { $0.id == first })?.time {
+                other.chapterID = chapters.last(where: { $0.start <= time })?.id
+            }
+            digest.items.append(other)
+        }
+        if !block.scene.isEmpty { digest.scene = block.scene }
+        digest.chapters = chapters
+        digest.processed = (digest.processed ?? []) + chunk.map { $0.id }
+        digest.stats = DigestEngine.stats(lines: lines, segments: store.segments(on: day))
+        digest.engine = engine
+        digest.generatedAt = Date()
+        digest.lineCount = lines.count
+        store.setDigest(digest)
+    }
+
+    private func takeChunk(_ remaining: inout [Line], limit: Int) -> [Line] {
+        var chunk: [Line] = []
+        var chars = 0
+        while let next = remaining.first, chunk.isEmpty || chars + next.text.count <= limit {
+            chunk.append(next)
+            chars += next.text.count
+            remaining.removeFirst()
+        }
+        return chunk
+    }
+
     /// full = 丢弃当天已有回顾，整天重新整理；force = 不等攒够，现在就整理新增内容。
     func update(day: String, full: Bool = false, force: Bool = false) {
         let store = Store.shared
-        let lines = store.lines(on: day)
-        guard !lines.isEmpty, !working else { return }
-        let segments = store.segments(on: day)
+        guard !working, !store.lines(on: day).isEmpty else { return }
         let engine = DigestEngine.engine
-        let existing = full ? nil : store.db.digests[day]
-        // 老版本的回顾没有 processed 记录：视为全部处理过
-        let done = Set(existing.map { $0.processed ?? lines.map { $0.id } } ?? [])
-        let fresh = lines.filter { !done.contains($0.id) }
-        guard !fresh.isEmpty else { return }
-        if engine != "rules" && !full && !force && !readyToProcess(fresh) { return }
-        let context = lines.filter { done.contains($0.id) }.suffix(8).map { $0.text }.joined(separator: "\n")
-
-        func commit(_ items: [DigestItem]) {
-            var digest = existing ?? Digest(day: day, stats: "", items: [], generatedAt: Date(), engine: engine, lineCount: 0)
-            digest.items.append(contentsOf: items)
-            digest.stats = DigestEngine.stats(lines: lines, segments: segments)
-            digest.engine = engine
-            digest.generatedAt = Date()
-            digest.lineCount = lines.count
-            digest.processed = Array(done) + fresh.map { $0.id }
-            store.setDigest(digest)
-            Notifier.apply()
+        if full {
+            store.mutate { db in db.digests[day] = nil }
+        } else if let digest = store.db.digests[day], digest.processed == nil {
+            // 老版本的回顾：标记为全部处理过，避免重复
+            var d = digest
+            d.processed = store.lines(on: day).map { $0.id }
+            store.setDigest(d)
         }
+        var remaining = fresh(day: day)
+        guard !remaining.isEmpty else { return }
 
         if engine == "rules" {
-            commit(DigestEngine.rules(day: day, lines: fresh, segments: segments).items)
+            merge(DigestEngine.rulesBlock(lines: remaining), chunk: remaining, day: day, engine: engine)
+            Notifier.apply()
             return
         }
+        if !full && !force && !readyToProcess(remaining) { return }
+
         working = true
         lastError = nil
-        Task {
-            do {
-                let result = try await DigestEngine.llm(day: day, lines: fresh, segments: segments, engine: engine, context: context)
-                await MainActor.run {
-                    commit(result.items)
-                    self.working = false
-                    if self.unprocessedCount(day: day) > 0 { self.update(day: day) }
-                }
-            } catch {
-                await MainActor.run {
+        let limit = engine == "device" ? 1400 : 6000
+        let time = DateFormatter()
+        time.dateFormat = "HH:mm"
+        let queued = remaining
+        Task { @MainActor in
+            var remaining = queued
+            while !remaining.isEmpty {
+                let chunk = self.takeChunk(&remaining, limit: limit)
+                let rows = chunk.enumerated().map { "[\($0.offset)] \(time.string(from: $0.element.time)) \($0.element.text)" }.joined(separator: "\n")
+                let ctx = self.context(day: day)
+                let prompt = (ctx.isEmpty ? "" : ctx + "\n\n") + "【本段转写】\n" + rows
+                do {
+                    let raw = try await DigestEngine.respond(engine: engine, prompt: prompt)
+                    let block = DigestEngine.parseBlock(raw, lines: chunk)
+                    self.merge(block, chunk: chunk, day: day, engine: engine)
+                } catch {
                     self.lastError = error.localizedDescription
-                    self.working = false
+                    break
                 }
             }
+            self.working = false
+            Notifier.apply()
         }
     }
 }

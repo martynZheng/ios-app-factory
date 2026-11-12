@@ -39,6 +39,13 @@ push 时 CI 只构建改动过的 App（改了 `fastlane/`、`.github/` 则全�
    每隔 2–3 分钟轮询一次（sleep），macOS runner 排队可能要几分钟。仍拿不到错误时，请用户把 Actions 页面的红色报错截图发给你。
 6. 成功后告诉用户：做了什么、版本号（如 `1.0.0 (12.1)`），"苹果处理 5–15 分钟后 TestFlight 会推送更新"。
 
+## 界面自查（改 UI 后必须做）
+App 目录下有 `preview.sh` 时，CI 的 `preview` job 会在模拟器里以演示数据（启动参数 `-demo 1 -tab N`）启动并截图，强推到 `ci-screenshots` 分支：
+```bash
+git fetch -q origin ci-screenshots && git --work-tree=/tmp/shots checkout -f FETCH_HEAD -- . ; ls /tmp/shots/<app>   # 再用 Read 看 PNG
+```
+看图确认排版、截断、深色模式没问题再告诉用户。演示数据在 `Demo.swift`，新增界面时同步加演示数据和截图。
+
 ## 目标设备：iPhone Duo（折叠屏）
 - 外屏 5.4″ 竖向约 466×678pt（compact 宽度，比普通 iPhone 更宽更矮）；内屏 7.6″ 展开后横向约 890×626pt（regular × regular）。
 - 布局只看可用尺寸 / size class，不要用 `UIScreen.main`、不要假设设备方向；横竖布局都要能用。

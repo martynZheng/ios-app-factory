@@ -37,6 +37,18 @@ struct DigestItem: Codable, Identifiable {
     var sourceLineIDs: [UUID]
     var done: Bool
     var exported: Bool
+    var chapterID: UUID? = nil
+}
+
+/// 一章 = 一段连续的话题（一位选手的路演、一个议题、一次闲聊）。鱼骨图上的一根骨头。
+struct Chapter: Codable, Identifiable, Equatable {
+    var id: UUID
+    var title: String
+    var summary: String
+    var speaker: String?
+    var start: Date
+    var end: Date
+    var sourceLineIDs: [UUID]
 }
 
 struct Digest: Codable {
@@ -48,6 +60,9 @@ struct Digest: Codable {
     var lineCount: Int
     /// 已经整理过的转写句（增量整理用）
     var processed: [UUID]? = nil
+    var chapters: [Chapter]? = nil
+    /// 模型判断出的场合（如“AI 大赛路演，我是主持人”）
+    var scene: String? = nil
 }
 
 struct DB: Codable {
@@ -55,12 +70,16 @@ struct DB: Codable {
     var lines: [Line] = []
     var digests: [String: Digest] = [:]
     var deletedSessions: [String] = []
+    /// 用户给某一天写的一句背景
+    var dayContext: [String: String]? = nil
 }
 
 /// 本地存储：一个 JSON 数据库 + 音频目录，都放在 Application Support，
 /// 使用 iOS 数据保护（设备首次解锁后可读，以便后台接收手表文件；设备锁定且未解锁过时为密文）。
 final class Store: ObservableObject {
     static let shared = Store()
+    /// 演示模式（-demo 1）：内存里的示例数据，不读写磁盘。CI 截图自测用。
+    static let isDemo = UserDefaults.standard.bool(forKey: "demo")
 
     @Published private(set) var db = DB()
     let audioDir: URL
@@ -83,7 +102,7 @@ final class Store: ObservableObject {
         dbURL = base.appendingPathComponent("db.json")
         let attrs: [FileAttributeKey: Any] = [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
         try? fm.createDirectory(at: audioDir, withIntermediateDirectories: true, attributes: attrs)
-        if let data = try? Data(contentsOf: dbURL), let loaded = try? JSONDecoder().decode(DB.self, from: data) {
+        if !Store.isDemo, let data = try? Data(contentsOf: dbURL), let loaded = try? JSONDecoder().decode(DB.self, from: data) {
             db = loaded
         }
     }
@@ -97,6 +116,7 @@ final class Store: ObservableObject {
 
     func saveNow() {
         saveScheduled = false
+        guard !Store.isDemo else { return }
         guard let data = try? JSONEncoder().encode(db) else { return }
         try? data.write(to: dbURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
@@ -172,6 +192,14 @@ final class Store: ObservableObject {
                 db.deletedSessions.append(sessionID)
                 if db.deletedSessions.count > 200 { db.deletedSessions.removeFirst(db.deletedSessions.count - 200) }
             }
+        }
+    }
+
+    func setDayContext(_ text: String, day: String) {
+        mutate { db in
+            var all = db.dayContext ?? [:]
+            all[day] = text
+            db.dayContext = all
         }
     }
 
