@@ -162,7 +162,7 @@ jobs:
         run: |
           [ -f "$APP_DIR/preview.sh" ] || { echo "no preview.sh"; exit 0; }
           while IFS='=' read -r k v; do export "$k=$v"; done < <(grep -E '^[A-Z_]+=' "$APP_DIR/app.env")
-          export APPLE_TEAM_ID="""
+          export APPLE_TEAM_ID=""
           if [ -d /Applications/Xcode_27.1.app ]; then sudo xcode-select -s /Applications/Xcode_27.1.app; fi
           brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
           OUT="$RUNNER_TEMP/shots/${{ matrix.app }}"
