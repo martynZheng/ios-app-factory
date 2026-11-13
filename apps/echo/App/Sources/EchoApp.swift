@@ -78,7 +78,8 @@ struct RootView: View {
     private func tab<V: View>(_ index: Int, _ title: String, _ symbol: String, @ViewBuilder content: () -> V) -> some View {
         NavigationStack {
             content()
-                .navigationTitle(title)
+                .navigationTitle(index == 0 ? "" : title)
+                .navigationBarTitleDisplayMode(index == 0 ? .inline : .large)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button { showSettings = true } label: { Image(systemName: "gearshape") }
