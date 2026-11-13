@@ -22,7 +22,7 @@ for attempt in 1 2 3; do
   limit 240 xcrun simctl boot "$DEV" || true
   limit 300 xcrun simctl bootstatus "$DEV" -b || true
 done
-xcrun simctl status_bar "$DEV" override --time "10:02" >/dev/null 2>&1 || true
+limit 30 xcrun simctl status_bar "$DEV" override --time "10:02" >/dev/null 2>&1 || true
 
 launch() {
   limit 30 xcrun simctl terminate "$DEV" "$BUNDLE_ID" >/dev/null 2>&1 || true
@@ -32,7 +32,7 @@ launch() {
 snap() {
   limit 40 xcrun simctl io "$DEV" screenshot "$1" >/dev/null 2>&1 || limit 40 xcrun simctl io "$DEV" screenshot --display=1 "$1" >/dev/null 2>&1 || true
 }
-shot() { local name="$1"; shift; launch "$@"; sleep 7; snap "$OUT/$name.png"; }
+shot() { local name="$1"; shift; echo "shot $name"; launch "$@"; sleep 7; snap "$OUT/$name.png"; }
 
 # 生长动画录屏
 launch -grow 1
@@ -46,7 +46,10 @@ if ! kill -0 $REC 2>/dev/null; then
 fi
 sleep 8
 kill -INT $REC 2>/dev/null || true
-wait $REC 2>/dev/null || true
+# 录屏进程偶尔收不到信号就不退出，最多等 20 秒，然后强杀
+for i in $(seq 1 20); do kill -0 $REC 2>/dev/null || break; sleep 1; done
+kill -9 $REC 2>/dev/null || true
+echo "video done"
 
 shot today
 shot today-bottom -scroll 1
