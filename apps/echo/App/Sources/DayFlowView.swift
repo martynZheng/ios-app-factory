@@ -52,10 +52,10 @@ struct DayFlowView: View {
 // MARK: - 栅格
 
 private enum Flow {
-    static let timeColumn: CGFloat = 54
-    static let rail: CGFloat = 26
-    static let dot: CGFloat = 9
-    static let dotY: CGFloat = 12      // 圆点中心，对齐标题第一行
+    static let timeColumn: CGFloat = 50
+    static let rail: CGFloat = 24
+    static let dot: CGFloat = 10
+    static let dotY: CGFloat = 13      // 圆圈中心，对齐标题第一行
 }
 
 // MARK: - 一段
@@ -67,26 +67,26 @@ private struct ChapterRow: View {
     let delay: Double
     @State private var shown = false
 
+    private var seed: CGFloat { CGFloat(abs(chapter.id.hashValue % 97)) / 9 }
+
     var body: some View {
-        let color = Daylight.color(chapter.start)
         HStack(alignment: .top, spacing: 0) {
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(Daylight.time(chapter.start))
-                    .font(.system(size: 17, weight: .semibold))
-                    .fontWidth(.condensed)
-                    .monospacedDigit()
+                    .font(Ink.clock(15))
+                    .foregroundStyle(Ink.ink)
                 Text(Daylight.minutes(chapter))
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Ink.ink3)
             }
             .frame(width: Flow.timeColumn, alignment: .leading)
-            .padding(.top, 1)
+            .padding(.top, 4)
 
-            rail(color)
+            rail
                 .frame(width: Flow.rail)
 
-            content(color)
-                .padding(.bottom, 34)
+            content
+                .padding(.bottom, 36)
                 .opacity(shown ? 1 : 0)
                 .offset(y: shown ? 0 : 8)
         }
@@ -98,38 +98,39 @@ private struct ChapterRow: View {
         .accessibilityHint("查看这一段")
     }
 
-    /// 细线 + 圆点。线从圆点往下画到这一段结束。
-    private func rail(_ color: Color) -> some View {
+    /// 手画的圈 + 往下的墨线。线一笔从圈下画到这一段结束。
+    private var rail: some View {
         GeometryReader { geo in
             ZStack(alignment: .top) {
-                Rectangle()
-                    .fill(Paper.rail)
-                    .frame(width: 1.5, height: max(0, geo.size.height - Flow.dotY))
-                    .scaleEffect(x: 1, y: shown ? 1 : 0, anchor: .top)
-                    .offset(y: Flow.dotY)
-                Circle()
-                    .fill(color)
+                InkRail(seed: seed)
+                    .trim(from: 0, to: shown ? 1 : 0)
+                    .stroke(Ink.ink.opacity(0.55), style: StrokeStyle(lineWidth: 1, lineCap: .round))
+                    .frame(width: 4, height: max(0, geo.size.height - Flow.dotY - Flow.dot / 2 - 3))
+                    .offset(y: Flow.dotY + Flow.dot / 2 + 3)
+                InkRing(seed: seed)
+                    .trim(from: 0, to: shown ? 1 : 0)
+                    .stroke(Ink.ink, style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
                     .frame(width: Flow.dot, height: Flow.dot)
-                    .background(Circle().fill(color.opacity(0.22)).frame(width: 19, height: 19).opacity(shown ? 1 : 0))
-                    .scaleEffect(shown ? 1 : 0.01)
                     .offset(y: Flow.dotY - Flow.dot / 2)
             }
             .frame(width: geo.size.width)
         }
     }
 
-    private func content(_ color: Color) -> some View {
+    private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(chapter.title)
-                .font(.system(size: 18, weight: .semibold))
+                .font(Ink.serif(19, relativeTo: .title3))
+                .foregroundStyle(Ink.ink)
+                .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
             if chapter.speaker != nil || followUps > 0 {
-                HStack(spacing: 8) {
-                    if let speaker = chapter.speaker { SpeakerTag(name: speaker, color: color) }
+                HStack(spacing: 14) {
+                    if let speaker = chapter.speaker { SpeakerTag(name: speaker) }
                     if followUps > 0 {
-                        Label("\(followUps) 件要跟进", systemImage: "checklist")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Color.accentColor)
+                        Text("\(followUps) 件要跟进")
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(Ink.vermilion)
                     }
                 }
                 .padding(.top, 8)
@@ -137,20 +138,21 @@ private struct ChapterRow: View {
             if !chapter.summary.isEmpty {
                 Text(chapter.summary)
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineSpacing(3)
+                    .foregroundStyle(Ink.ink2)
+                    .lineSpacing(5)
                     .lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 8)
+                    .padding(.top, 9)
             }
             if !points.isEmpty {
-                VStack(alignment: .leading, spacing: 7) {
+                VStack(alignment: .leading, spacing: 8) {
                     ForEach(points.prefix(3)) { point in
                         HStack(alignment: .top, spacing: 10) {
-                            Circle().fill(color).frame(width: 5, height: 5).padding(.top, 7)
+                            TwigMark(color: Ink.ink2)
                             Text(point.text)
                                 .font(.subheadline)
-                                .lineSpacing(2)
+                                .foregroundStyle(Ink.ink)
+                                .lineSpacing(3)
                                 .lineLimit(2)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -158,11 +160,11 @@ private struct ChapterRow: View {
                     if points.count > 3 {
                         Text("另有 \(points.count - 3) 条")
                             .font(.caption)
-                            .foregroundStyle(.tertiary)
-                            .padding(.leading, 15)
+                            .foregroundStyle(Ink.ink3)
+                            .padding(.leading, 19)
                     }
                 }
-                .padding(.top, 11)
+                .padding(.top, 12)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -181,33 +183,32 @@ private struct EndRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: 0) {
             Text(live ? "现在" : (end.map { Daylight.time($0) } ?? ""))
-                .font(.system(size: 17, weight: .semibold))
-                .fontWidth(.condensed)
-                .monospacedDigit()
-                .foregroundStyle(live ? Color.red : .secondary)
+                .font(live ? Ink.serif(15, relativeTo: .subheadline) : Ink.clock(15))
+                .foregroundStyle(live ? Ink.vermilion : Ink.ink3)
                 .frame(width: Flow.timeColumn, alignment: .leading)
             ZStack {
                 if live && !reduceMotion {
                     Circle()
-                        .fill(Color.red.opacity(0.35))
+                        .fill(Ink.vermilion.opacity(0.3))
                         .frame(width: 22, height: 22)
-                        .scaleEffect(pulse ? 1.25 : 0.4)
+                        .scaleEffect(pulse ? 1.2 : 0.4)
                         .opacity(pulse ? 0 : 1)
                 }
-                Circle()
-                    .strokeBorder(live ? Color.red : Paper.rail, lineWidth: live ? 0 : 1.5)
-                    .background(Circle().fill(live ? Color.red : Color.clear))
-                    .frame(width: Flow.dot, height: Flow.dot)
+                if live {
+                    Circle().fill(Ink.vermilion).frame(width: 7, height: 7)
+                } else {
+                    InkRing(seed: 5).stroke(Ink.ink3, lineWidth: 1).frame(width: 7, height: 7)
+                }
             }
             .frame(width: Flow.rail)
-            Text(live ? "正在记录，新的内容会接着出现在这里" : "这一天记录到这里")
+            Text(live ? "还在记录，新的一段会接在这里" : "这一天记到这里")
                 .font(.footnote)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Ink.ink3)
         }
         .padding(.bottom, 6)
         .onAppear {
             guard live else { return }
-            withAnimation(.easeOut(duration: 1.5).repeatForever(autoreverses: false)) { pulse = true }
+            withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) { pulse = true }
         }
         .accessibilityElement(children: .combine)
     }

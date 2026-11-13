@@ -32,7 +32,7 @@ struct TodosView: View {
             VStack(alignment: .leading, spacing: 0) {
                 if todos.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("没有要跟进的事").font(.title3.weight(.semibold))
+                        Text("没有要跟进的事").font(Ink.serif(21, relativeTo: .title3)).foregroundStyle(Ink.ink)
                         Text("对话里明确交给你或别人去做的事会出现在这里。写进「提醒事项」或日历前都会先问你。")
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
@@ -40,8 +40,8 @@ struct TodosView: View {
                 }
                 if !open.isEmpty {
                     Text("\(open.count) 件未完成")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .font(Ink.serif(17, relativeTo: .headline))
+                        .foregroundStyle(Ink.ink2)
                         .padding(.top, 8)
                         .padding(.bottom, 2)
                         .contentTransition(.numericText())
@@ -52,8 +52,8 @@ struct TodosView: View {
                 }
                 if !done.isEmpty {
                     Text("已完成")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .font(Ink.serif(17, relativeTo: .headline))
+                        .foregroundStyle(Ink.ink3)
                         .padding(.top, 30)
                         .padding(.bottom, 2)
                     ForEach(done) { ref in
@@ -67,7 +67,7 @@ struct TodosView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .animation(.spring(response: 0.45, dampingFraction: 0.85), value: done.count)
         }
-        .background(Paper.background.ignoresSafeArea())
+        .background(Ink.paper.ignoresSafeArea())
         .sheet(item: $source) { SourceSheet(item: $0) }
         .confirmationDialog("写入到系统", isPresented: Binding(get: { exporting != nil }, set: { if !$0 { exporting = nil } }),
                             titleVisibility: .visible, presenting: exporting) { ref in
@@ -85,7 +85,7 @@ struct TodosView: View {
     }
 
     private var divider: some View {
-        Rectangle().fill(Paper.hairline).frame(height: 1).padding(.leading, 40)
+        InkRule(seed: 2).stroke(Ink.rule, lineWidth: 0.8).frame(height: 2).padding(.leading, 40)
     }
 
     private func meta(_ ref: TodoRef) -> String {
@@ -107,11 +107,9 @@ struct TodosView: View {
             Button {
                 withAnimation(.snappy) { store.updateItem(day: ref.day, id: ref.item.id) { $0.done.toggle() } }
             } label: {
-                Image(systemName: ref.item.done ? "checkmark.circle.fill" : "circle")
-                    .font(.title2)
-                    .foregroundStyle(ref.item.done ? Color.accentColor : Color.secondary)
-                    .contentTransition(.symbolEffect(.replace))
-                    .frame(width: 28)
+                InkCheckbox(done: ref.item.done, size: 21, seed: CGFloat(ref.item.text.count))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .sensoryFeedback(.success, trigger: ref.item.done) { _, now in now }
@@ -121,10 +119,11 @@ struct TodosView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(ref.item.text)
                         .font(.body)
-                        .strikethrough(ref.item.done)
-                        .foregroundStyle(ref.item.done ? .secondary : .primary)
+                        .strikethrough(ref.item.done, color: Ink.ink3)
+                        .foregroundStyle(ref.item.done ? Ink.ink3 : Ink.ink)
+                        .lineSpacing(3)
                         .multilineTextAlignment(.leading)
-                    Text(meta(ref)).font(.footnote).foregroundStyle(.secondary)
+                    Text(meta(ref)).font(.footnote).foregroundStyle(Ink.ink3)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -137,7 +136,7 @@ struct TodosView: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.body.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Ink.ink3)
                     .frame(width: 32, height: 28)
                     .contentShape(Rectangle())
             }

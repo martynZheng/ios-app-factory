@@ -40,24 +40,12 @@ enum Daylight {
     }
 }
 
-/// 页面底色与气泡底色：冷调纸白 / 夜里的深海军蓝。
+/// 旧名字，统一指向墨与纸。
 enum Paper {
-    static let background = Color(UIColor { t in
-        t.userInterfaceStyle == .dark
-            ? UIColor(red: 0.055, green: 0.071, blue: 0.118, alpha: 1)
-            : UIColor(red: 0.957, green: 0.965, blue: 0.980, alpha: 1)
-    })
-    static let bubble = Color(UIColor { t in
-        t.userInterfaceStyle == .dark
-            ? UIColor(red: 0.110, green: 0.133, blue: 0.196, alpha: 1)
-            : UIColor.white
-    })
-    static let rail = Color(UIColor { t in
-        t.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.16) : UIColor(white: 0, alpha: 0.12)
-    })
-    static let hairline = Color(UIColor { t in
-        t.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.08) : UIColor(white: 0, alpha: 0.06)
-    })
+    static let background = Ink.paper
+    static let bubble = Ink.wash
+    static let rail = Ink.rule
+    static let hairline = Ink.rule
 }
 
 /// 斜着的小记号：章节详情里要点前面的标记。
@@ -74,9 +62,9 @@ struct TwigMark: View {
     let color: Color
     var body: some View {
         Twig()
-            .stroke(color, style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
-            .frame(width: 9, height: 9)
-            .padding(.top, 6)
+            .stroke(color, style: StrokeStyle(lineWidth: 1.3, lineCap: .round))
+            .frame(width: 9, height: 6)
+            .padding(.top, 9)
             .accessibilityHidden(true)
     }
 }
@@ -124,8 +112,8 @@ struct TranscriptBubble: View {
         // 末尾放一段透明的时间文字占位，再把真正的时间叠在右下角
         (Text(line.text) + Text("　\(stamp)").font(.caption2).foregroundColor(.clear))
             .font(.body)
-            .foregroundStyle(.primary)
-            .lineSpacing(2)
+            .foregroundStyle(Ink.ink)
+            .lineSpacing(3)
             .padding(.horizontal, 13)
             .padding(.vertical, 8)
             .overlay(alignment: .bottomTrailing) {
@@ -137,15 +125,16 @@ struct TranscriptBubble: View {
                     Text(stamp)
                 }
                 .font(.caption2)
-                .foregroundStyle(playing ? Color.accentColor : .secondary)
+                .foregroundStyle(playing ? Ink.vermilion : Ink.ink3)
                 .padding(.trailing, 10)
                 .padding(.bottom, 6)
             }
-            .background(
-                UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: tail ? 6 : 18,
-                                       bottomTrailingRadius: 18, topTrailingRadius: 18, style: .continuous)
-                    .fill(playing ? Color.accentColor.opacity(0.14) : (highlight?.opacity(0.10) ?? Paper.bubble))
-            )
+            .background {
+                let shape = UnevenRoundedRectangle(topLeadingRadius: 16, bottomLeadingRadius: tail ? 4 : 16,
+                                                   bottomTrailingRadius: 16, topTrailingRadius: 16, style: .continuous)
+                shape.fill(playing ? Ink.vermilion.opacity(0.08) : (highlight?.opacity(0.08) ?? Ink.wash))
+                    .overlay(shape.strokeBorder(playing ? Ink.vermilion.opacity(0.5) : Ink.rule, lineWidth: 0.7))
+            }
             .contentShape(Rectangle())
             .onTapGesture {
                 if hasAudio { player.toggle(segmentID: line.segmentID, at: line.offset) }
@@ -179,7 +168,7 @@ struct ChapterSheet: View {
     let day: String
 
     var body: some View {
-        let color = Daylight.color(chapter.start)
+        let color = Ink.ink
         let items = (store.db.digests[day]?.items ?? []).filter { $0.chapterID == chapter.id }
         let points = items.filter { $0.kind == .point }
         let others = items.filter { $0.kind != .point }
@@ -189,23 +178,24 @@ struct ChapterSheet: View {
                 VStack(alignment: .leading, spacing: 0) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(Daylight.span(chapter))
-                            .font(.system(size: 26, weight: .bold))
-                            .fontWidth(.compressed)
-                            .monospacedDigit()
-                        Text(Daylight.minutes(chapter)).font(.footnote).foregroundStyle(.secondary)
+                            .font(Ink.clock(17))
+                            .foregroundStyle(Ink.ink2)
+                        Text(Daylight.minutes(chapter)).font(.footnote).foregroundStyle(Ink.ink3)
                     }
                     Text(chapter.title)
-                        .font(.system(size: 26, weight: .bold))
-                        .padding(.top, 4)
+                        .font(Ink.serif(26, relativeTo: .title))
+                        .foregroundStyle(Ink.ink)
+                        .lineSpacing(4)
+                        .padding(.top, 6)
                     if let speaker = chapter.speaker {
-                        SpeakerTag(name: speaker, color: color).padding(.top, 8)
+                        SpeakerTag(name: speaker, color: color).padding(.top, 10)
                     }
                     if !chapter.summary.isEmpty {
                         Text(chapter.summary)
                             .font(.body)
-                            .foregroundStyle(.secondary)
-                            .lineSpacing(3)
-                            .padding(.top, 12)
+                            .foregroundStyle(Ink.ink2)
+                            .lineSpacing(5)
+                            .padding(.top, 14)
                     }
                     if !points.isEmpty {
                         VStack(alignment: .leading, spacing: 12) {
@@ -213,7 +203,7 @@ struct ChapterSheet: View {
                                 NavigationLink { SourceDetail(item: point) } label: {
                                     HStack(alignment: .top, spacing: 12) {
                                         TwigMark(color: color)
-                                        Text(point.text).font(.body).multilineTextAlignment(.leading)
+                                        Text(point.text).font(.body).foregroundStyle(Ink.ink).lineSpacing(3).multilineTextAlignment(.leading)
                                         Spacer(minLength: 0)
                                     }
                                 }
@@ -231,10 +221,12 @@ struct ChapterSheet: View {
                         }
                         .padding(.top, 22)
                     }
+                    InkRule(seed: 3).stroke(Ink.rule, lineWidth: 1).frame(height: 2).padding(.top, 30)
                     Text("原话")
-                        .font(.headline)
-                        .padding(.top, 30)
-                        .padding(.bottom, 10)
+                        .font(Ink.serif(19, relativeTo: .title3))
+                        .foregroundStyle(Ink.ink)
+                        .padding(.top, 18)
+                        .padding(.bottom, 12)
                     if lines.isEmpty {
                         Text("原始转写已被删除").font(.subheadline).foregroundStyle(.secondary)
                     } else {
@@ -245,24 +237,22 @@ struct ChapterSheet: View {
                 .padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .background(Paper.background.ignoresSafeArea())
+            .background(Ink.paper.ignoresSafeArea())
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
         }
+        .tint(Ink.ink)
         .presentationDetents([.large])
     }
 }
 
 struct SpeakerTag: View {
     let name: String
-    let color: Color
+    var color: Color = Ink.indigo
     var body: some View {
         HStack(spacing: 6) {
-            Circle().fill(color).frame(width: 7, height: 7)
-            Text(name).font(.footnote.weight(.semibold))
+            InkRing(seed: 2).stroke(Ink.indigo, lineWidth: 1).frame(width: 8, height: 8)
+            Text(name).font(.footnote.weight(.medium)).foregroundStyle(Ink.indigo)
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 4)
-        .background(Capsule().fill(color.opacity(0.16)))
     }
 }
 
@@ -275,12 +265,12 @@ struct SourceDetail: View {
         let lines = item.sourceLineIDs.compactMap { store.line($0) }.sorted { $0.time < $1.time }
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text(item.text).font(.title3.weight(.semibold))
-                Text("依据的原话").font(.subheadline).foregroundStyle(.secondary)
+                Text(item.text).font(Ink.serif(21, relativeTo: .title3)).foregroundStyle(Ink.ink).lineSpacing(4)
+                Text("依据的原话").font(.subheadline).foregroundStyle(Ink.ink3)
                 if lines.isEmpty {
                     Text("原始转写已被删除").font(.subheadline).foregroundStyle(.secondary)
                 } else {
-                    BubbleStack(lines: lines, highlight: .accentColor)
+                    BubbleStack(lines: lines)
                 }
             }
             .padding(22)

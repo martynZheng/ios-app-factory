@@ -95,7 +95,7 @@ struct TranscriptView: View {
                 }
             }
         }
-        .background(Paper.background.ignoresSafeArea())
+        .background(Ink.paper.ignoresSafeArea())
         .searchable(text: $query, prompt: "搜索说过的话")
         .safeAreaInset(edge: .bottom) { workingPill }
         .sheet(item: $editing) { line in editor(line) }
@@ -188,10 +188,11 @@ struct TranscriptView: View {
     private var emptyState: some View {
         VStack(spacing: 10) {
             Image(systemName: query.isEmpty ? "waveform" : "magnifyingglass")
-                .font(.system(size: 34, weight: .light))
-                .foregroundStyle(.tertiary)
+                .font(.system(size: 30, weight: .ultraLight))
+                .foregroundStyle(Ink.ink3)
             Text(query.isEmpty ? "还没有转写" : "没有找到")
-                .font(.headline)
+                .font(Ink.serif(19, relativeTo: .headline))
+                .foregroundStyle(Ink.ink)
             Text(query.isEmpty ? "在手表上开始录音，说过的话会一句句出现在这里。" : "换个词再搜。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -214,7 +215,7 @@ struct TranscriptView: View {
                 Spacer()
             }
             .padding(18)
-            .background(Paper.background.ignoresSafeArea())
+            .background(Ink.paper.ignoresSafeArea())
             .navigationTitle("修改转写")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -235,12 +236,13 @@ struct TranscriptView: View {
 struct DayChip: View {
     let text: String
     var body: some View {
-        Text(text)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 11)
-            .padding(.vertical, 5)
-            .background(.thinMaterial, in: Capsule())
+        HStack(spacing: 10) {
+            InkRule(seed: 1).stroke(Ink.rule, lineWidth: 0.8).frame(width: 36, height: 2)
+            Text(text)
+                .font(Ink.serif(13, relativeTo: .caption))
+                .foregroundStyle(Ink.ink2)
+            InkRule(seed: 4).stroke(Ink.rule, lineWidth: 0.8).frame(width: 36, height: 2)
+        }
     }
 }
 
@@ -255,6 +257,6 @@ struct Notice: View {
             Spacer(minLength: 0)
         }
         .padding(12)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(tint.opacity(0.10)))
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(tint.opacity(0.5), lineWidth: 0.8))
     }
 }

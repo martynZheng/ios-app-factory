@@ -18,6 +18,17 @@ struct EchoApp: App {
         PhoneSync.shared.activate()
         if Store.isDemo { Demo.seed() }
         DigestCoordinator.shared.start()
+        Self.styleNavigationBars()
+    }
+
+    /// 导航栏大标题用宋体，和页面里的标题一致。
+    private static func styleNavigationBars() {
+        guard let large = UIFont(name: "NotoSerifCJKsc-SemiBold", size: 32),
+              let small = UIFont(name: "NotoSerifCJKsc-SemiBold", size: 17) else { return }
+        let ink = UIColor { t in t.userInterfaceStyle == .dark ? UIColor(red: 0.94, green: 0.90, blue: 0.81, alpha: 1) : UIColor(red: 0.11, green: 0.11, blue: 0.11, alpha: 1) }
+        let nav = UINavigationBar.appearance()
+        nav.largeTitleTextAttributes = [.font: large, .foregroundColor: ink]
+        nav.titleTextAttributes = [.font: small, .foregroundColor: ink]
     }
 
     var body: some Scene {
@@ -29,6 +40,7 @@ struct EchoApp: App {
                     .environmentObject(sync)
                     .environmentObject(player)
                     .environmentObject(coordinator)
+                    .tint(Ink.ink)
                 if appLock && locked { lockScreen }
             }
             .onChange(of: scenePhase) { _, phase in

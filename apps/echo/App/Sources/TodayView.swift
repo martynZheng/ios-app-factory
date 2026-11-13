@@ -40,7 +40,7 @@ struct TodayView: View {
                         if chapters.isEmpty {
                             Text(digest == nil ? "内容攒够一段后，这一天的经过会从这里一节一节长出来。" : "这一天还没有分章。点最下面的「重新整理」生成。")
                                 .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(Ink.ink3)
                                 .padding(.horizontal, 22)
                                 .padding(.top, 12)
                         } else {
@@ -75,7 +75,7 @@ struct TodayView: View {
                 }
             }
         }
-        .background(Paper.background.ignoresSafeArea())
+        .background(Ink.paper.ignoresSafeArea())
         .sensoryFeedback(.impact(weight: .light, intensity: 0.7), trigger: chapters.count)
         .onChange(of: day) { _, newDay in coordinator.update(day: newDay) }
         .sheet(item: $source) { SourceSheet(item: $0) }
@@ -117,8 +117,8 @@ struct TodayView: View {
                 }
                 .accessibilityLabel("前一天")
                 Text(isToday ? "今天，\(dateText)" : dateText)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.secondary)
+                    .font(.subheadline)
+                    .foregroundStyle(Ink.ink2)
                     .contentTransition(.numericText())
                 Button { shift(1) } label: {
                     Image(systemName: "chevron.right").frame(width: 30, height: 30)
@@ -128,17 +128,25 @@ struct TodayView: View {
                 Spacer()
                 if isLive { LivePill() }
             }
-            .font(.subheadline.weight(.semibold))
+            .font(.subheadline)
+            .foregroundStyle(Ink.ink)
             .padding(.leading, -8)
+            StudyVignette(live: isLive)
+                .frame(maxWidth: 560)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, -10)
+                .padding(.vertical, 2)
             Text(title)
-                .font(.system(size: 30, weight: .bold))
+                .font(Ink.serif(29, relativeTo: .largeTitle))
+                .foregroundStyle(Ink.ink)
+                .lineSpacing(5)
                 .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
                 .contentTransition(.opacity)
             if hasLines {
                 Text(statusText(digest))
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Ink.ink3)
                     .contentTransition(.numericText())
                 HStack(spacing: 18) {
                     Button(mine.isEmpty ? "补一句背景，分章更准" : "修改背景") {
@@ -150,8 +158,10 @@ struct TodayView: View {
                     }
                 }
                 .font(.footnote.weight(.medium))
+                .foregroundStyle(Ink.indigo)
+                .buttonStyle(.plain)
                 if let error = coordinator.lastError, coordinator.unprocessedCount(day: day) > 0 {
-                    Text(error).font(.footnote).foregroundStyle(.red)
+                    Text(error).font(.footnote).foregroundStyle(Ink.vermilion)
                 }
             }
         }
@@ -179,7 +189,7 @@ struct TodayView: View {
     }
 
     private func sectionTitle(_ text: String) -> some View {
-        Text(text).font(.system(size: 21, weight: .bold))
+        Text(text).font(Ink.serif(21, relativeTo: .title2)).foregroundStyle(Ink.ink)
     }
 
     // MARK: 要跟进的
@@ -207,11 +217,12 @@ struct TodayView: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(item.text)
                                 .font(.body)
-                                .strikethrough(item.done)
-                                .foregroundStyle(item.done ? .secondary : .primary)
+                                .strikethrough(item.done, color: Ink.ink3)
+                                .foregroundStyle(item.done ? Ink.ink3 : Ink.ink)
+                                .lineSpacing(3)
                                 .multilineTextAlignment(.leading)
                             if let meta = meta(item, digest) {
-                                Text(meta).font(.footnote).foregroundStyle(.secondary)
+                                Text(meta).font(.footnote).foregroundStyle(Ink.ink3)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -222,7 +233,7 @@ struct TodayView: View {
                 .padding(.vertical, 11)
                 .transition(.opacity.combined(with: .move(edge: .top)))
                 if item.id != items.last?.id {
-                    Rectangle().fill(Paper.hairline).frame(height: 1).padding(.leading, 38)
+                    InkRule(seed: CGFloat(item.text.count)).stroke(Ink.rule, lineWidth: 0.8).frame(height: 2).padding(.leading, 38)
                 }
             }
         }
@@ -235,27 +246,24 @@ struct TodayView: View {
             Button {
                 withAnimation(.snappy) { store.updateItem(day: day, id: item.id) { $0.done.toggle() } }
             } label: {
-                Image(systemName: item.done ? "checkmark.circle.fill" : "circle")
-                    .font(.title3)
-                    .foregroundStyle(item.done ? Color.accentColor : Color.secondary)
-                    .contentTransition(.symbolEffect(.replace))
-                    .frame(width: 26)
+                InkCheckbox(done: item.done, size: 20, seed: CGFloat(item.text.count))
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .sensoryFeedback(.success, trigger: item.done) { _, now in now }
             .accessibilityLabel(item.done ? "标为未完成" : "标为完成")
         case .decision:
-            Image(systemName: "checkmark")
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(Color.accentColor)
+            InkTick()
+                .stroke(Ink.ink, style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+                .frame(width: 14, height: 11)
                 .frame(width: 26)
-                .padding(.top, 3)
+                .padding(.top, 6)
         default:
-            Image(systemName: "questionmark")
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(.orange)
+            Text("？")
+                .font(Ink.serif(17, relativeTo: .body))
+                .foregroundStyle(Ink.indigo)
                 .frame(width: 26)
-                .padding(.top, 3)
         }
     }
 
@@ -275,13 +283,15 @@ struct TodayView: View {
 
     private var tools: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Rectangle().fill(Paper.hairline).frame(height: 1)
-            Text(segmentSummary).font(.caption).foregroundStyle(.secondary).padding(.top, 6)
+            InkRule(seed: 7).stroke(Ink.rule, lineWidth: 1).frame(height: 2)
+            Text(segmentSummary).font(.caption).foregroundStyle(Ink.ink3).lineSpacing(3).padding(.top, 6)
             HStack(spacing: 22) {
                 Button("重新整理") { confirmFull = true }.disabled(coordinator.working)
                 Button("重新转写") { confirmRetranscribe = true }.disabled(transcriber.busy)
             }
             .font(.footnote.weight(.medium))
+            .foregroundStyle(Ink.indigo)
+            .buttonStyle(.plain)
         }
     }
 
@@ -305,31 +315,13 @@ struct TodayView: View {
         let pending = store.segments(on: day).filter { $0.status == .pending }.count
         return VStack(alignment: .leading, spacing: 10) {
             Text(pending > 0 ? "有 \(pending) 段录音正在转写" : "这一天还没有记录")
-                .font(.title3.weight(.semibold))
+                .font(Ink.serif(21, relativeTo: .title3))
+                .foregroundStyle(Ink.ink)
             Text(pending > 0 ? "转写完会出现在这里。" : "在 Apple Watch 上打开拾言，点「开始录音」。录音边录边同步过来，攒够一段就长出一节。")
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Ink.ink2)
+                .lineSpacing(4)
         }
-    }
-}
-
-/// 正在记录的小标记。
-struct LivePill: View {
-    @State private var on = false
-    var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(Color.red)
-                .frame(width: 7, height: 7)
-                .opacity(on ? 1 : 0.35)
-            Text("记录中").font(.caption.weight(.semibold))
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(Capsule().fill(Color.red.opacity(0.12)))
-        .foregroundStyle(Color.red)
-        .onAppear { withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { on = true } }
-        .accessibilityLabel("正在记录")
     }
 }
 
@@ -376,7 +368,7 @@ struct Chip: View {
             .font(.caption)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(Capsule().fill(warn ? Color.orange.opacity(0.15) : Color.secondary.opacity(0.12)))
-            .foregroundStyle(warn ? Color.orange : Color.secondary)
+            .overlay(Capsule().strokeBorder(warn ? Ink.vermilion.opacity(0.6) : Ink.rule, lineWidth: 0.8))
+            .foregroundStyle(warn ? Ink.vermilion : Ink.ink2)
     }
 }
