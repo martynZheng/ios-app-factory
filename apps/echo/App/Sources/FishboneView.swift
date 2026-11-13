@@ -111,7 +111,7 @@ struct FishboneView: View {
 /// 一根骨头：斜的肋骨 + 脊柱上的节点 + 这一章的文字。
 private struct Bone: View {
     static let blockW: CGFloat = 236
-    static let blockH: CGFloat = 262
+    static let blockH: CGFloat = 236
     static let gap: CGFloat = 16
     /// 文字块左缘到脊柱节点的水平距离
     static let reach: CGFloat = blockW + 46
@@ -128,7 +128,7 @@ private struct Bone: View {
         let color = Daylight.color(chapter.start)
         ZStack(alignment: .topLeading) {
             RibShape(from: CGPoint(x: Bone.reach, y: mid),
-                     to: CGPoint(x: Bone.reach - 34, y: top ? mid - 178 : mid + 178))
+                     to: CGPoint(x: Bone.reach - 34, y: top ? mid - 164 : mid + 164))
                 .trim(from: 0, to: shown ? 1 : 0)
                 .stroke(color, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
             Circle()

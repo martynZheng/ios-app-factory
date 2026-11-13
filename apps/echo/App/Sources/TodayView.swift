@@ -22,6 +22,7 @@ struct TodayView: View {
     var body: some View {
         let lines = store.lines(on: day)
         let digest = store.db.digests[day]
+        GeometryReader { geo in
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 header(digest, hasLines: !lines.isEmpty)
@@ -30,8 +31,13 @@ struct TodayView: View {
                 if lines.isEmpty {
                     empty.padding(.horizontal, 22).padding(.top, 56)
                 } else {
+                    // 横向滚动的鱼骨图只占安全区内的宽度，两端淡出，不钻到系统侧边栏下面
                     fishbone(digest)
-                        .padding(.top, 14)
+                        .frame(width: geo.size.width)
+                        .mask(LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.035),
+                                                     .init(color: .black, location: 0.93), .init(color: .clear, location: 1)],
+                                             startPoint: .leading, endPoint: .trailing))
+                        .padding(.top, 6)
                     followUps(digest)
                         .padding(.horizontal, 22)
                     tools
@@ -40,7 +46,8 @@ struct TodayView: View {
                         .padding(.bottom, 28)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(width: geo.size.width, alignment: .leading)
+        }
         }
         .background(Paper.background.ignoresSafeArea())
         .sheet(item: $source) { SourceSheet(item: $0) }
