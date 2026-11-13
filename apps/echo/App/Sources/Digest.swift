@@ -412,7 +412,7 @@ final class DigestCoordinator: ObservableObject {
     /// full = 丢弃当天已有回顾，整天重新整理；force = 不等攒够，现在就整理新增内容。
     func update(day: String, full: Bool = false, force: Bool = false) {
         let store = Store.shared
-        guard !working, !store.lines(on: day).isEmpty else { return }
+        guard !Store.isDemo, !working, !store.lines(on: day).isEmpty else { return }
         let engine = DigestEngine.engine
         if full {
             store.mutate { db in db.digests[day] = nil }

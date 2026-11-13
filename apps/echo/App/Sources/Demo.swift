@@ -38,9 +38,8 @@ enum Demo {
             db.lines = lines
             db.dayContext = [day: ""]
         }
-        let first = Array(lines[0..<8])
-        let second = Array(lines[8...])
-        let json1 = """
+        let a = Array(lines[0..<8]), b = Array(lines[8..<13]), c = Array(lines[13...])
+        let jsonA = """
         {"scene":"AI 实战挑战赛决赛路演，我在主持","chapters":[
         {"title":"开场：六支队伍决赛路演","speaker":null,"summary":"主持人开场，说明今天六支队伍路演，每队十分钟讲解加五分钟问答。","continues":false,"sources":[0,1,2],"points":[{"text":"每队十分钟讲解加五分钟问答","sources":[1]}]},
         {"title":"二号选手：告警自闭环助手小美","speaker":"二号选手","summary":"云业务增长让监控告警处理越来越慢，团队沉淀 34 个技能，让助手小美自主解析并处理告警。","continues":false,"sources":[3,4,5,6,7],"points":[
@@ -49,20 +48,35 @@ enum Demo {
           {"text":"小美会解析故障位置和机器 SN，获取日志后自主制定恢复方案","sources":[6]}]}],
         "decisions":[],"todos":[],"pending":[]}
         """
-        let json2 = """
-        {"scene":"AI 实战挑战赛决赛路演，我在主持","chapters":[
+        let jsonB = """
+        {"scene":"","chapters":[
         {"title":"二号选手：告警自闭环助手小美","speaker":"二号选手","summary":"团队沉淀 34 个技能让助手小美自主处理告警；所有恢复操作先建工单、执行后确认并生成可审查报告。","continues":true,"sources":[0],"points":[{"text":"恢复操作先创建工单，执行后确认真实恢复并生成可审查的报告","sources":[0]}]},
         {"title":"五号选手：提交与验收的检查机制","speaker":"五号选手","summary":"在代码提交和验收流程中加入增量与全量检查，并用旧页面基线对照发现新引入的问题。","continues":false,"sources":[1,2,3,4],"points":[
           {"text":"提交时触发增量检查，之后还有全量检查","sources":[2]},
           {"text":"先获取旧页面的 API 和样式基线，发布后对照验证","sources":[3]},
-          {"text":"机制可延伸到前后端全链路","sources":[4]}]},
-        {"title":"中场：评分汇总与奖项","speaker":null,"summary":"中场休息时安排了评分表汇总，并确认了奖项设置。","continues":false,"sources":[5,6,7],"points":[]}],
-        "decisions":[{"text":"决赛奖项设置为一等奖一名、二等奖两名","sources":[6]}],
-        "todos":[{"text":"会后汇总六支队伍的评分表并发给评委组","owner":"汯毅","due":"周五","sources":[5]}],
-        "pending":[{"text":"场地下周还能不能用，需要跟行政确认","sources":[7]}]}
+          {"text":"机制可延伸到前后端全链路","sources":[4]}]}],
+        "decisions":[],"todos":[],"pending":[]}
+        """
+        let jsonC = """
+        {"scene":"","chapters":[
+        {"title":"中场：评分汇总与奖项","speaker":null,"summary":"中场休息时安排了评分表汇总，并确认了奖项设置。","continues":false,"sources":[0,1,2],"points":[]}],
+        "decisions":[{"text":"决赛奖项设置为一等奖一名、二等奖两名","sources":[1]}],
+        "todos":[{"text":"会后汇总六支队伍的评分表并发给评委组","owner":"汯毅","due":"周五","sources":[0]}],
+        "pending":[{"text":"场地下周还能不能用，需要跟行政确认","sources":[2]}]}
         """
         let coordinator = DigestCoordinator.shared
-        coordinator.merge(DigestEngine.parseBlock(json1, lines: first), chunk: first, day: day, engine: "device")
-        coordinator.merge(DigestEngine.parseBlock(json2, lines: second), chunk: second, day: day, engine: "device")
+        let steps: [(String, [Line])] = [(jsonA, a), (jsonB, b), (jsonC, c)]
+        if UserDefaults.standard.bool(forKey: "grow") {
+            // 录屏演示：一节一节长出来
+            for (i, step) in steps.enumerated() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2 + Double(i) * 1.8) {
+                    coordinator.merge(DigestEngine.parseBlock(step.0, lines: step.1), chunk: step.1, day: day, engine: "device")
+                }
+            }
+        } else {
+            for step in steps {
+                coordinator.merge(DigestEngine.parseBlock(step.0, lines: step.1), chunk: step.1, day: day, engine: "device")
+            }
+        }
     }
 }

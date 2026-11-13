@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// 今日回顾：页头（这一天在干什么）→ 要跟进的 → 这一天的经过（竖向鱼骨图，往下生长）。
 struct TodayView: View {
     @EnvironmentObject private var store: Store
     @EnvironmentObject private var coordinator: DigestCoordinator
@@ -11,6 +12,7 @@ struct TodayView: View {
     @State private var contextDraft = ""
     @State private var confirmFull = false
     @State private var confirmRetranscribe = false
+    @Namespace private var zoom
 
     private static let dateTitle: DateFormatter = {
         let f = DateFormatter()
@@ -20,45 +22,67 @@ struct TodayView: View {
     }()
 
     var body: some View {
-        let lines = store.lines(on: day)
         let digest = store.db.digests[day]
-        GeometryReader { geo in
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                header(digest, hasLines: !lines.isEmpty)
-                    .padding(.horizontal, 22)
-                    .padding(.top, 8)
-                if lines.isEmpty {
-                    empty.padding(.horizontal, 22).padding(.top, 56)
-                } else {
-                    // 横向滚动的鱼骨图只占安全区内的宽度，两端淡出，不钻到系统侧边栏下面
-                    fishbone(digest)
-                        .frame(width: geo.size.width)
-                        .mask(LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.035),
-                                                     .init(color: .black, location: 0.93), .init(color: .clear, location: 1)],
-                                             startPoint: .leading, endPoint: .trailing))
+        let hasLines = !store.lines(on: day).isEmpty
+        let chapters = digest?.chapters ?? []
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    header(digest, hasLines: hasLines)
+                        .padding(.horizontal, 22)
                         .padding(.top, 6)
-                    followUps(digest)
-                        .padding(.horizontal, 22)
-                    tools
-                        .padding(.horizontal, 22)
-                        .padding(.top, 36)
-                        .padding(.bottom, 28)
+                    if hasLines {
+                        followUps(digest)
+                            .padding(.horizontal, 22)
+                        sectionTitle(day == Store.dayKey(Date()) ? "今天的经过" : "这一天的经过")
+                            .padding(.horizontal, 22)
+                            .padding(.top, 34)
+                        if chapters.isEmpty {
+                            Text(digest == nil ? "内容攒够一段后，这一天的经过会从这里一节一节长出来。" : "这一天还没有分章。点最下面的「重新整理」生成。")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 22)
+                                .padding(.top, 12)
+                        } else {
+                            FishboneView(chapters: chapters, items: digest?.items ?? [], live: isLive, namespace: zoom) { chapter = $0 }
+                                .id(day)
+                                .padding(.horizontal, 14)
+                                .padding(.top, 14)
+                        }
+                        tools
+                            .padding(.horizontal, 22)
+                            .padding(.top, 30)
+                            .padding(.bottom, 24)
+                    } else {
+                        empty.padding(.horizontal, 22).padding(.top, 48)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .animation(.spring(response: 0.5, dampingFraction: 0.88), value: digest?.items.count ?? 0)
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .onChange(of: chapters.count) { old, new in
+                guard new > old else { return }
+                withAnimation(.smooth(duration: 0.65)) { proxy.scrollTo("fish-head", anchor: .bottom) }
+            }
+            .onAppear {
+                coordinator.update(day: day)
+                if Store.isDemo, UserDefaults.standard.bool(forKey: "scroll") {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { proxy.scrollTo("fish-head", anchor: .bottom) }
+                }
+                if Store.isDemo, UserDefaults.standard.object(forKey: "chapter") != nil {
+                    chapter = store.db.digests[day]?.chapters?[safe: UserDefaults.standard.integer(forKey: "chapter")]
                 }
             }
-            .frame(width: geo.size.width, alignment: .leading)
-        }
         }
         .background(Paper.background.ignoresSafeArea())
-        .sheet(item: $source) { SourceSheet(item: $0) }
-        .sheet(item: $chapter) { ChapterSheet(chapter: $0, day: day) }
-        .onAppear {
-            coordinator.update(day: day)
-            if Store.isDemo, UserDefaults.standard.object(forKey: "chapter") != nil {
-                chapter = store.db.digests[day]?.chapters?[safe: UserDefaults.standard.integer(forKey: "chapter")]
-            }
-        }
+        .sensoryFeedback(.impact(weight: .light, intensity: 0.7), trigger: chapters.count)
         .onChange(of: day) { _, newDay in coordinator.update(day: newDay) }
+        .sheet(item: $source) { SourceSheet(item: $0) }
+        .sheet(item: $chapter) { ch in
+            ChapterSheet(chapter: ch, day: day)
+                .modifier(ZoomDestination(id: ch.id, namespace: zoom))
+        }
         .alert("这一天你在做什么", isPresented: $editingContext) {
             TextField("如：上午主持 AI 大赛决赛", text: $contextDraft)
             Button("保存") {
@@ -66,7 +90,7 @@ struct TodayView: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("写一句就够。整理时会以它为准来分章，保存后点「重新整理」生效。")
+            Text("写一句就够。整理时以它为准来分章，保存后点「重新整理」生效。")
         }
         .confirmationDialog("用当前的识别引擎把这一天留着的录音重新转写一遍，原来的文字和回顾会被替换。", isPresented: $confirmRetranscribe, titleVisibility: .visible) {
             Button("重新转写") { transcriber.retranscribe(day: day) }
@@ -78,34 +102,44 @@ struct TodayView: View {
         }
     }
 
-    // MARK: 页头：日期、这一天的标题、状态
+    // MARK: 页头
 
     private func header(_ digest: Digest?, hasLines: Bool) -> some View {
         let isToday = day == Store.dayKey(Date())
         let dateText = Self.dateTitle.string(from: Store.date(fromDayKey: day))
         let mine = (store.db.dayContext?[day] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let title = !mine.isEmpty ? mine : ((digest?.scene ?? "").isEmpty ? (isToday ? "今天" : dateText) : (digest?.scene ?? ""))
+        let scene = digest?.scene ?? ""
+        let title = !mine.isEmpty ? mine : (scene.isEmpty ? (isToday ? "今天" : dateText) : scene)
         return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 14) {
-                Button { shift(-1) } label: { Image(systemName: "chevron.left") }
-                    .accessibilityLabel("前一天")
+            HStack(spacing: 4) {
+                Button { shift(-1) } label: {
+                    Image(systemName: "chevron.left").frame(width: 30, height: 30)
+                }
+                .accessibilityLabel("前一天")
                 Text(isToday ? "今天，\(dateText)" : dateText)
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.secondary)
-                Button { shift(1) } label: { Image(systemName: "chevron.right") }
-                    .disabled(isToday)
-                    .accessibilityLabel("后一天")
+                    .contentTransition(.numericText())
+                Button { shift(1) } label: {
+                    Image(systemName: "chevron.right").frame(width: 30, height: 30)
+                }
+                .disabled(isToday)
+                .accessibilityLabel("后一天")
                 Spacer()
+                if isLive { LivePill() }
             }
             .font(.subheadline.weight(.semibold))
+            .padding(.leading, -8)
             Text(title)
                 .font(.system(size: 30, weight: .bold))
                 .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
+                .contentTransition(.opacity)
             if hasLines {
                 Text(statusText(digest))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .contentTransition(.numericText())
                 HStack(spacing: 18) {
                     Button(mine.isEmpty ? "补一句背景，分章更准" : "修改背景") {
                         contextDraft = mine
@@ -121,6 +155,7 @@ struct TodayView: View {
                 }
             }
         }
+        .animation(.snappy, value: day)
     }
 
     private func statusText(_ digest: Digest?) -> String {
@@ -128,37 +163,23 @@ struct TodayView: View {
         if transcriber.busy { return "正在转写…" }
         let waiting = coordinator.unprocessedCount(day: day)
         let base = digest?.stats ?? DigestEngine.stats(lines: store.lines(on: day), segments: store.segments(on: day))
-        return waiting > 0 ? "\(base)，有 \(waiting) 句新内容待整理" : base
+        return waiting > 0 ? "\(base)，\(waiting) 句新内容待整理" : base
     }
 
     private func shift(_ delta: Int) {
         let date = Calendar.current.date(byAdding: .day, value: delta, to: Store.date(fromDayKey: day)) ?? Date()
-        day = Store.dayKey(date)
-    }
-
-    // MARK: 鱼骨图
-
-    @ViewBuilder
-    private func fishbone(_ digest: Digest?) -> some View {
-        let chapters = digest?.chapters ?? []
-        if chapters.isEmpty {
-            Text(digest == nil || (digest?.items.isEmpty ?? true)
-                 ? "内容攒够一段后，这一天的鱼骨图会从这里长出来。"
-                 : "这一天还没有分章。点最下面的「重新整理」生成鱼骨图。")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 22)
-                .padding(.vertical, 40)
-        } else {
-            FishboneView(chapters: chapters, items: digest?.items ?? [], live: isLive) { chapter = $0 }
-                .id(day)
-        }
+        withAnimation(.snappy) { day = Store.dayKey(date) }
     }
 
     private var isLive: Bool {
+        if Store.isDemo, UserDefaults.standard.bool(forKey: "grow") { return true }
         if coordinator.working || transcriber.busy { return true }
         guard day == Store.dayKey(Date()), let last = store.segments(on: day).map({ $0.start.addingTimeInterval($0.duration) }).max() else { return false }
         return Date().timeIntervalSince(last) < 180
+    }
+
+    private func sectionTitle(_ text: String) -> some View {
+        Text(text).font(.system(size: 21, weight: .bold))
     }
 
     // MARK: 要跟进的
@@ -169,19 +190,18 @@ struct TodayView: View {
         let todos = items.filter { $0.kind == .todo }
         let decisions = items.filter { $0.kind == .decision }
         let pending = items.filter { $0.kind == .pending }
-        if !todos.isEmpty { group("要你跟进的", todos) }
-        if !decisions.isEmpty { group("定下来的", decisions) }
-        if !pending.isEmpty { group("还没定的", pending) }
+        if !todos.isEmpty { group("要你跟进的", todos, digest) }
+        if !decisions.isEmpty { group("定下来的", decisions, digest) }
+        if !pending.isEmpty { group("还没定的", pending, digest) }
     }
 
-    private func group(_ title: String, _ items: [DigestItem]) -> some View {
+    private func group(_ title: String, _ items: [DigestItem], _ digest: Digest?) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(title)
-                .font(.system(size: 20, weight: .bold))
-                .padding(.top, 34)
-                .padding(.bottom, 6)
+            sectionTitle(title)
+                .padding(.top, 32)
+                .padding(.bottom, 4)
             ForEach(items) { item in
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
                     marker(item)
                     Button { source = item } label: {
                         VStack(alignment: .leading, spacing: 3) {
@@ -190,7 +210,7 @@ struct TodayView: View {
                                 .strikethrough(item.done)
                                 .foregroundStyle(item.done ? .secondary : .primary)
                                 .multilineTextAlignment(.leading)
-                            if let meta = meta(item) {
+                            if let meta = meta(item, digest) {
                                 Text(meta).font(.footnote).foregroundStyle(.secondary)
                             }
                         }
@@ -199,8 +219,11 @@ struct TodayView: View {
                     }
                     .buttonStyle(.plain)
                 }
-                .padding(.vertical, 12)
-                if item.id != items.last?.id { Divider() }
+                .padding(.vertical, 11)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+                if item.id != items.last?.id {
+                    Rectangle().fill(Paper.hairline).frame(height: 1).padding(.leading, 38)
+                }
             }
         }
     }
@@ -210,34 +233,49 @@ struct TodayView: View {
         switch item.kind {
         case .todo:
             Button {
-                store.updateItem(day: day, id: item.id) { $0.done.toggle() }
+                withAnimation(.snappy) { store.updateItem(day: day, id: item.id) { $0.done.toggle() } }
             } label: {
                 Image(systemName: item.done ? "checkmark.circle.fill" : "circle")
                     .font(.title3)
                     .foregroundStyle(item.done ? Color.accentColor : Color.secondary)
+                    .contentTransition(.symbolEffect(.replace))
+                    .frame(width: 26)
             }
             .buttonStyle(.plain)
+            .sensoryFeedback(.success, trigger: item.done) { _, now in now }
             .accessibilityLabel(item.done ? "标为未完成" : "标为完成")
         case .decision:
-            Image(systemName: "checkmark").font(.subheadline.weight(.bold)).foregroundStyle(Color.accentColor).frame(width: 24)
+            Image(systemName: "checkmark")
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 26)
+                .padding(.top, 3)
         default:
-            Image(systemName: "questionmark").font(.subheadline.weight(.bold)).foregroundStyle(.orange).frame(width: 24)
+            Image(systemName: "questionmark")
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(.orange)
+                .frame(width: 26)
+                .padding(.top, 3)
         }
     }
 
-    private func meta(_ item: DigestItem) -> String? {
-        guard item.kind == .todo else { return nil }
+    private func meta(_ item: DigestItem, _ digest: Digest?) -> String? {
         var parts: [String] = []
-        if let owner = item.owner { parts.append(owner) }
-        if let due = item.due { parts.append(item.dueDate == nil ? "\(due)（日期待确认）" : "\(due)前") }
+        if item.kind == .todo {
+            if let owner = item.owner { parts.append(owner) }
+            if let due = item.due { parts.append(item.dueDate == nil ? "\(due)（日期待确认）" : "\(due)前") }
+        }
+        if let id = item.chapterID, let chapter = digest?.chapters?.first(where: { $0.id == id }) {
+            parts.append("出自「\(chapter.title)」")
+        }
         return parts.isEmpty ? nil : parts.joined(separator: "，")
     }
 
-    // MARK: 页脚工具与空状态
+    // MARK: 页脚与空状态
 
     private var tools: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Divider()
+            Rectangle().fill(Paper.hairline).frame(height: 1)
             Text(segmentSummary).font(.caption).foregroundStyle(.secondary).padding(.top, 6)
             HStack(spacing: 22) {
                 Button("重新整理") { confirmFull = true }.disabled(coordinator.working)
@@ -268,10 +306,30 @@ struct TodayView: View {
         return VStack(alignment: .leading, spacing: 10) {
             Text(pending > 0 ? "有 \(pending) 段录音正在转写" : "这一天还没有记录")
                 .font(.title3.weight(.semibold))
-            Text(pending > 0 ? "转写完会出现在这里。" : "在 Apple Watch 上打开拾言，点「开始录音」。录音会边录边同步过来，攒够一段就长出一根骨头。")
+            Text(pending > 0 ? "转写完会出现在这里。" : "在 Apple Watch 上打开拾言，点「开始录音」。录音边录边同步过来，攒够一段就长出一节。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+/// 正在记录的小标记。
+struct LivePill: View {
+    @State private var on = false
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(Color.red)
+                .frame(width: 7, height: 7)
+                .opacity(on ? 1 : 0.35)
+            Text("记录中").font(.caption.weight(.semibold))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Capsule().fill(Color.red.opacity(0.12)))
+        .foregroundStyle(Color.red)
+        .onAppear { withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { on = true } }
+        .accessibilityLabel("正在记录")
     }
 }
 
@@ -280,7 +338,7 @@ extension View {
     func card() -> some View {
         self.padding(14)
             .frame(maxWidth: .infinity)
-            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(.secondarySystemGroupedBackground)))
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Paper.bubble))
     }
 }
 

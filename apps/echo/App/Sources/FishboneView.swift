@@ -1,325 +1,264 @@
 import SwiftUI
 
-/// 一天里的光：凌晨靛蓝 → 清晨杏色 → 上午金 → 正午天蓝 → 傍晚橘 → 入夜紫。
-/// 鱼骨图上每一章的颜色取自它发生的时刻，整条脊柱就是这一天的天色。
-enum Daylight {
-    private static let stops: [(Double, (Double, Double, Double))] = [
-        (0, (0.22, 0.26, 0.62)), (5, (0.93, 0.60, 0.42)), (9, (0.91, 0.64, 0.16)),
-        (13, (0.20, 0.60, 0.90)), (17, (0.93, 0.47, 0.30)), (20, (0.48, 0.42, 0.92)), (24, (0.22, 0.26, 0.62)),
-    ]
-
-    static func color(_ date: Date) -> Color {
-        let c = Calendar.current.dateComponents([.hour, .minute], from: date)
-        let h = Double(c.hour ?? 12) + Double(c.minute ?? 0) / 60
-        for i in 1..<stops.count where h <= stops[i].0 {
-            let a = stops[i - 1], b = stops[i]
-            let t = (h - a.0) / (b.0 - a.0)
-            return Color(red: a.1.0 + (b.1.0 - a.1.0) * t, green: a.1.1 + (b.1.1 - a.1.1) * t, blue: a.1.2 + (b.1.2 - a.1.2) * t)
-        }
-        return Color(red: 0.22, green: 0.26, blue: 0.62)
-    }
-
-    private static let clock: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm"
-        return f
-    }()
-
-    static func time(_ date: Date) -> String { clock.string(from: date) }
-
-    static func span(_ chapter: Chapter) -> String {
-        let a = time(chapter.start), b = time(chapter.end)
-        return a == b ? a : "\(a)–\(b)"
-    }
-
-    static func minutes(_ chapter: Chapter) -> String {
-        let m = max(1, Int((chapter.end.timeIntervalSince(chapter.start) / 60).rounded()))
-        return "\(m) 分钟"
-    }
-}
-
-/// 鱼骨图：一天是一条向前游的鱼。尾巴是这一天的开始，脊柱是时间，
-/// 每一章是一根斜着的骨头，上下交替；鱼头在“现在”，新的一章从头后面长出来。
+/// 竖向鱼骨图：鱼尾在上（这一天的开始），脊柱向下是时间，鱼头在最下面（现在）。
+/// 每一章是一根斜向上的大骨头，章里的要点是从它分出来的小骨头。
+/// 新的一章从鱼头上方长出来，鱼头跟着往下游——像聊天一样，最新的总在底部。
 struct FishboneView: View {
     let chapters: [Chapter]
     let items: [DigestItem]
     let live: Bool
+    let namespace: Namespace.ID
     let onTap: (Chapter) -> Void
 
-    @State private var drawn = false
+    /// 首次出现时已有的章数：这些依次入场；之后新增的立即生长。
+    @State private var initialCount: Int
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private let step: CGFloat = 156
-    private let tailX: CGFloat = 40
-    private var mid: CGFloat { Bone.blockH + Bone.gap + 8 }
-    private var height: CGFloat { mid * 2 }
-    private func x(_ index: Int) -> CGFloat { tailX + 36 + Bone.reach + CGFloat(index) * step }
-    private var headX: CGFloat { x(max(chapters.count - 1, 0)) + 54 }
+    init(chapters: [Chapter], items: [DigestItem], live: Bool, namespace: Namespace.ID, onTap: @escaping (Chapter) -> Void) {
+        self.chapters = chapters
+        self.items = items
+        self.live = live
+        self.namespace = namespace
+        self.onTap = onTap
+        _initialCount = State(initialValue: chapters.count)
+    }
 
-    private var spineColors: [Color] {
-        let colors = chapters.map { Daylight.color($0.start) }
-        return colors.count >= 2 ? colors : [colors.first ?? .accentColor, colors.first ?? .accentColor]
+    private func color(_ index: Int) -> Color {
+        guard !chapters.isEmpty else { return .accentColor }
+        return Daylight.color(chapters[min(max(index, 0), chapters.count - 1)].start)
+    }
+
+    private func delay(_ index: Int) -> Double {
+        if reduceMotion { return 0 }
+        return index < initialCount ? 0.12 + Double(min(index, 8)) * 0.09 : 0.05
     }
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                ZStack(alignment: .topLeading) {
-                    TailShape()
-                        .stroke(spineColors[0], style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
-                        .frame(width: 30, height: 52)
-                        .offset(x: tailX - 30, y: mid - 26)
-                        .opacity(drawn ? 1 : 0)
-                    Capsule()
-                        .fill(LinearGradient(colors: spineColors, startPoint: .leading, endPoint: .trailing))
-                        .frame(width: drawn ? headX - tailX : 0, height: 4)
-                        .offset(x: tailX, y: mid - 2)
-                    ForEach(Array(chapters.enumerated()), id: \.element.id) { index, chapter in
-                        Bone(chapter: chapter,
-                             points: items.filter { $0.kind == .point && $0.chapterID == chapter.id },
-                             top: index % 2 == 0, mid: mid, delay: reduceMotion ? 0 : 0.25 + Double(min(index, 12)) * 0.12,
-                             onTap: { onTap(chapter) })
-                            .frame(width: Bone.reach + 12, height: height)
-                            .offset(x: x(index) - Bone.reach)
-                    }
-                    HeadView(color: spineColors[spineColors.count - 1], live: live)
-                        .frame(width: 62, height: 68)
-                        .offset(x: headX - 2, y: mid - 34)
-                        .opacity(drawn ? 1 : 0)
-                    Color.clear.frame(width: 1, height: 1).offset(x: headX + 90).id("head")
-                }
-                .frame(width: headX + 96, height: height, alignment: .topLeading)
-                .animation(.spring(response: 0.7, dampingFraction: 0.85), value: chapters.count)
+        VStack(alignment: .leading, spacing: 0) {
+            TailRow(color: color(0), start: chapters.first?.start)
+            ForEach(Array(chapters.enumerated()), id: \.element.id) { index, chapter in
+                BoneRow(chapter: chapter,
+                        points: items.filter { $0.kind == .point && $0.chapterID == chapter.id },
+                        followUps: items.filter { $0.kind != .point && $0.chapterID == chapter.id }.count,
+                        color: color(index), next: color(index + 1), delay: delay(index))
+                    .modifier(ZoomSource(id: chapter.id, namespace: namespace))
+                    .contentShape(Rectangle())
+                    .onTapGesture { onTap(chapter) }
+                    .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: 18)), removal: .opacity))
             }
-            .onAppear {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 1.0)) { drawn = true }
-                if live {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                        withAnimation(.easeInOut(duration: 0.8)) { proxy.scrollTo("head", anchor: .trailing) }
-                    }
-                }
-            }
-            .onChange(of: chapters.count) { _, _ in
-                withAnimation(.easeInOut(duration: 0.7)) { proxy.scrollTo("head", anchor: .trailing) }
-            }
+            HeadRow(color: color(chapters.count - 1), live: live, end: chapters.last?.end)
+                .id("fish-head")
         }
+        .animation(reduceMotion ? nil : .spring(response: 0.55, dampingFraction: 0.86), value: chapters.count)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("这一天的鱼骨图，共 \(chapters.count) 章")
+        .accessibilityLabel("这一天的经过，共 \(chapters.count) 章")
     }
 }
 
-/// 一根骨头：斜的肋骨 + 脊柱上的节点 + 这一章的文字。
-private struct Bone: View {
-    static let blockW: CGFloat = 236
-    static let blockH: CGFloat = 236
-    static let gap: CGFloat = 16
-    /// 文字块左缘到脊柱节点的水平距离
-    static let reach: CGFloat = blockW + 46
+// MARK: - 几何常量
 
+private enum Spine {
+    static let x: CGFloat = 19          // 脊柱的水平位置
+    static let gutter: CGFloat = 60     // 文字左缘
+    static let width: CGFloat = 3
+    static let nodeY: CGFloat = 62      // 大骨头在脊柱上的起点
+    static let ribEnd = CGPoint(x: 52, y: 34)
+}
+
+// MARK: - 一章 = 一根大骨头
+
+private struct BoneRow: View {
     let chapter: Chapter
     let points: [DigestItem]
-    let top: Bool
-    let mid: CGFloat
+    let followUps: Int
+    let color: Color
+    let next: Color
     let delay: Double
-    let onTap: () -> Void
     @State private var shown = false
 
     var body: some View {
-        let color = Daylight.color(chapter.start)
-        ZStack(alignment: .topLeading) {
-            RibShape(from: CGPoint(x: Bone.reach, y: mid),
-                     to: CGPoint(x: Bone.reach - 34, y: top ? mid - 164 : mid + 164))
-                .trim(from: 0, to: shown ? 1 : 0)
-                .stroke(color, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-            Circle()
-                .fill(color)
-                .frame(width: 13, height: 13)
-                .overlay(Circle().stroke(Paper.background, lineWidth: 3))
-                .scaleEffect(shown ? 1 : 0.01)
-                .position(x: Bone.reach, y: mid)
-            text(color)
-                .frame(width: Bone.blockW, height: Bone.blockH, alignment: top ? .bottomLeading : .topLeading)
-                .contentShape(Rectangle())
-                .onTapGesture(perform: onTap)
-                .position(x: Bone.blockW / 2, y: top ? mid - Bone.gap - Bone.blockH / 2 : mid + Bone.gap + Bone.blockH / 2)
+        HStack(alignment: .top, spacing: 0) {
+            Color.clear.frame(width: Spine.gutter)
+            content
+                .padding(.top, 20)
+                .padding(.bottom, 30)
+                .padding(.trailing, 6)
                 .opacity(shown ? 1 : 0)
-                .offset(y: shown ? 0 : (top ? 10 : -10))
+                .offset(y: shown ? 0 : 10)
         }
+        .background(alignment: .topLeading) { skeleton }
         .onAppear {
-            withAnimation(.spring(response: 0.6, dampingFraction: 0.82).delay(delay)) { shown = true }
-        }
-    }
-
-    private func text(_ color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline, spacing: 7) {
-                Text(Daylight.time(chapter.start))
-                    .font(.system(size: 30, weight: .bold))
-                    .fontWidth(.compressed)
-                    .monospacedDigit()
-                Text(Daylight.minutes(chapter))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Text(chapter.title)
-                .font(.system(size: 17, weight: .semibold))
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-            if let speaker = chapter.speaker {
-                Text(speaker).font(.footnote.weight(.semibold)).foregroundStyle(color)
-            }
-            if !chapter.summary.isEmpty {
-                Text(chapter.summary)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            ForEach(points.prefix(2)) { point in
-                HStack(alignment: .firstTextBaseline, spacing: 7) {
-                    Capsule().fill(color).frame(width: 9, height: 2.5).offset(y: -3.5)
-                    Text(point.text).font(.footnote).lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            if points.count > 2 {
-                Text("另有 \(points.count - 2) 条").font(.caption).foregroundStyle(.tertiary)
-            }
+            withAnimation(.spring(response: 0.62, dampingFraction: 0.82).delay(delay)) { shown = true }
         }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
         .accessibilityHint("查看这一章")
     }
-}
 
-private struct RibShape: Shape {
-    let from: CGPoint
-    let to: CGPoint
-    func path(in rect: CGRect) -> Path {
-        var p = Path()
-        p.move(to: from)
-        p.addLine(to: to)
-        return p
+    /// 脊柱这一段 + 大骨头 + 节点。
+    private var skeleton: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .fill(LinearGradient(colors: [color, next], startPoint: .top, endPoint: .bottom))
+                    .frame(width: Spine.width, height: geo.size.height)
+                    .offset(x: Spine.x - Spine.width / 2)
+                Path { p in
+                    p.move(to: CGPoint(x: Spine.x, y: Spine.nodeY))
+                    p.addLine(to: Spine.ribEnd)
+                }
+                .trim(from: 0, to: shown ? 1 : 0)
+                .stroke(color, style: StrokeStyle(lineWidth: 2.6, lineCap: .round))
+                Circle()
+                    .fill(color)
+                    .frame(width: 13, height: 13)
+                    .overlay(Circle().stroke(Paper.background, lineWidth: 3))
+                    .scaleEffect(shown ? 1 : 0.01)
+                    .position(x: Spine.x, y: Spine.nodeY)
+            }
+        }
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(Daylight.time(chapter.start))
+                    .font(.system(size: 24, weight: .bold))
+                    .fontWidth(.compressed)
+                    .monospacedDigit()
+                Text(Daylight.minutes(chapter))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                if followUps > 0 {
+                    Label("\(followUps)", systemImage: "checklist")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .accessibilityLabel("\(followUps) 件要跟进")
+                }
+            }
+            Text(chapter.title)
+                .font(.system(size: 19, weight: .semibold))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 2)
+            if let speaker = chapter.speaker {
+                SpeakerTag(name: speaker, color: color).padding(.top, 7)
+            }
+            if !chapter.summary.isEmpty {
+                Text(chapter.summary)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(2.5)
+                    .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 8)
+            }
+            if !points.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(points.prefix(3)) { point in
+                        HStack(alignment: .top, spacing: 11) {
+                            TwigMark(color: color)
+                            Text(point.text)
+                                .font(.subheadline)
+                                .lineSpacing(2)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    if points.count > 3 {
+                        Text("另有 \(points.count - 3) 条")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 20)
+                    }
+                }
+                .padding(.top, 12)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-private struct TailShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        var p = Path()
-        p.move(to: CGPoint(x: rect.minX, y: rect.minY))
-        p.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
-        p.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
-        p.addQuadCurve(to: CGPoint(x: rect.minX, y: rect.minY), control: CGPoint(x: rect.midX * 0.9, y: rect.midY))
-        return p
+// MARK: - 鱼尾（一天的开始）
+
+private struct TailRow: View {
+    let color: Color
+    let start: Date?
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 0) {
+            Path { p in
+                p.move(to: CGPoint(x: Spine.x - 13, y: 2))
+                p.addQuadCurve(to: CGPoint(x: Spine.x, y: 22), control: CGPoint(x: Spine.x - 4, y: 10))
+                p.addQuadCurve(to: CGPoint(x: Spine.x + 13, y: 2), control: CGPoint(x: Spine.x + 4, y: 10))
+                p.move(to: CGPoint(x: Spine.x, y: 22))
+                p.addLine(to: CGPoint(x: Spine.x, y: 34))
+            }
+            .stroke(color, style: StrokeStyle(lineWidth: Spine.width, lineCap: .round, lineJoin: .round))
+            .frame(width: Spine.gutter, height: 34, alignment: .topLeading)
+            if let start {
+                Text("\(Daylight.time(start)) 开始记录")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }
 
-/// 鱼头：线描轮廓 + 一只眼睛。还在记录时眼睛会一下一下地亮。
-private struct HeadView: View {
+// MARK: - 鱼头（现在）
+
+private struct HeadRow: View {
     let color: Color
     let live: Bool
+    let end: Date?
     @State private var pulse = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width, h = geo.size.height
-            ZStack {
-                Path { p in
-                    p.move(to: CGPoint(x: 0, y: 0))
-                    p.addQuadCurve(to: CGPoint(x: w, y: h / 2), control: CGPoint(x: w * 0.78, y: h * 0.04))
-                    p.addQuadCurve(to: CGPoint(x: 0, y: h), control: CGPoint(x: w * 0.78, y: h * 0.96))
-                    p.addQuadCurve(to: CGPoint(x: 0, y: 0), control: CGPoint(x: w * 0.22, y: h / 2))
-                }
-                .stroke(color, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
-                if live {
-                    Circle().stroke(color.opacity(0.6), lineWidth: 2)
-                        .frame(width: 20, height: 20)
-                        .scaleEffect(pulse ? 1.5 : 0.6)
+        HStack(alignment: .center, spacing: 0) {
+            ZStack(alignment: .topLeading) {
+                Rectangle().fill(color).frame(width: Spine.width, height: 8).offset(x: Spine.x - Spine.width / 2)
+                FishHead()
+                    .stroke(color, style: StrokeStyle(lineWidth: Spine.width, lineCap: .round, lineJoin: .round))
+                    .frame(width: 34, height: 40)
+                    .offset(x: Spine.x - 17, y: 6)
+                if live && !reduceMotion {
+                    Circle()
+                        .stroke(color.opacity(0.7), lineWidth: 2)
+                        .frame(width: 18, height: 18)
+                        .scaleEffect(pulse ? 1.6 : 0.6)
                         .opacity(pulse ? 0 : 1)
-                        .position(x: w * 0.52, y: h * 0.36)
+                        .position(x: Spine.x, y: 21)
                 }
-                Circle().fill(color).frame(width: 8, height: 8).position(x: w * 0.52, y: h * 0.36)
+                Circle().fill(color).frame(width: 7, height: 7).position(x: Spine.x, y: 21)
             }
+            .frame(width: Spine.gutter, height: 50, alignment: .topLeading)
+            Group {
+                if live {
+                    Text("还在记录，新内容会从这里长出来")
+                } else if let end {
+                    Text("记录到 \(Daylight.time(end))")
+                }
+            }
+            .font(.footnote)
+            .foregroundStyle(live ? Color.accentColor : .secondary)
         }
+        .padding(.bottom, 8)
         .onAppear {
-            withAnimation(.easeOut(duration: 1.5).repeatForever(autoreverses: false)) { pulse = true }
+            guard live else { return }
+            withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) { pulse = true }
         }
-        .accessibilityLabel(live ? "还在记录" : "记录到这里")
+        .accessibilityElement(children: .combine)
     }
 }
 
-/// 页面底色：冷调的纸白 / 夜里的深蓝。
-enum Paper {
-    static let background = Color(UIColor { trait in
-        trait.userInterfaceStyle == .dark
-            ? UIColor(red: 0.055, green: 0.075, blue: 0.125, alpha: 1)
-            : UIColor(red: 0.965, green: 0.970, blue: 0.980, alpha: 1)
-    })
-}
-
-// MARK: 章节详情
-
-struct ChapterSheet: View {
-    @EnvironmentObject private var store: Store
-    @Environment(\.dismiss) private var dismiss
-    let chapter: Chapter
-    let day: String
-
-    var body: some View {
-        let items = (store.db.digests[day]?.items ?? []).filter { $0.chapterID == chapter.id }
-        let points = items.filter { $0.kind == .point }
-        let others = items.filter { $0.kind != .point }
-        NavigationStack {
-            List {
-                Section {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(Daylight.span(chapter) + (chapter.speaker.map { "，\($0)" } ?? ""))
-                            .font(.caption).foregroundStyle(.secondary)
-                        if !chapter.summary.isEmpty { Text(chapter.summary) }
-                    }
-                }
-                if !points.isEmpty {
-                    Section("要点") {
-                        ForEach(points) { point in
-                            NavigationLink { SourceDetail(item: point) } label: { Text(point.text) }
-                        }
-                    }
-                }
-                if !others.isEmpty {
-                    Section("这一章里的决定 / 待办 / 待确认") {
-                        ForEach(others) { item in
-                            NavigationLink { SourceDetail(item: item) } label: { ItemRow(item: item) }
-                        }
-                    }
-                }
-                Section("原始转写") {
-                    let lines = chapter.sourceLineIDs.compactMap { store.line($0) }.sorted { $0.time < $1.time }
-                    if lines.isEmpty { Text("来源转写已被删除").foregroundStyle(.secondary) }
-                    ForEach(lines) { LineRow(line: $0) }
-                }
-            }
-            .navigationTitle(chapter.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
-        }
-        .presentationDetents([.large])
-    }
-}
-
-/// 一条整理结果所依据的原句。
-struct SourceDetail: View {
-    @EnvironmentObject private var store: Store
-    let item: DigestItem
-
-    var body: some View {
-        List {
-            Section("整理结果") { Text(item.text) }
-            Section("原始转写") {
-                let lines = item.sourceLineIDs.compactMap { store.line($0) }
-                if lines.isEmpty { Text("来源转写已被删除").foregroundStyle(.secondary) }
-                ForEach(lines) { LineRow(line: $0) }
-            }
-        }
-        .navigationTitle("来源")
-        .navigationBarTitleDisplayMode(.inline)
+/// 朝下的鱼头轮廓。
+private struct FishHead: Shape {
+    func path(in r: CGRect) -> Path {
+        var p = Path()
+        p.move(to: CGPoint(x: r.minX, y: r.minY))
+        p.addQuadCurve(to: CGPoint(x: r.midX, y: r.maxY), control: CGPoint(x: r.minX + 1, y: r.maxY * 0.78))
+        p.addQuadCurve(to: CGPoint(x: r.maxX, y: r.minY), control: CGPoint(x: r.maxX - 1, y: r.maxY * 0.78))
+        p.addQuadCurve(to: CGPoint(x: r.minX, y: r.minY), control: CGPoint(x: r.midX, y: r.minY + 8))
+        return p
     }
 }
