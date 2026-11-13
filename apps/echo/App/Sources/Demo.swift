@@ -82,15 +82,17 @@ enum Demo {
         "pending":[{"text":"场地下周还能不能用，需要跟行政确认","sources":[2]}]}
         """
         Task { @MainActor in
-            var a1 = ChatMessage(role: .assistant, text: "今天你明确答应的只有一件：**会后汇总六支队伍的评分表，周五前发给评委组**（中场休息时说的）。\n另外有一件还没定：场地下周能不能用，要跟行政确认。")
+            guard !UserDefaults.standard.bool(forKey: "emptyChat") else { return }
+            var q = ChatMessage(role: .user, text: "今天我答应了别人什么？")
+            q.time = at(9, 58)
+            var a1 = ChatMessage(role: .assistant, text: "今天你明确答应的只有一件：**会后汇总六支队伍的评分表，周五前发给评委组**（中场休息时说的）。\n\n另外有一件还没定：场地下周能不能用，要跟行政确认。")
+            a1.time = at(9, 58)
             a1.proposals = [Proposal(kind: .reminder, title: "汇总评分表发给评委组", notes: nil, start: at(17, 0))]
-            var p = ChatMessage(role: .assistant, text: "**评分表还没汇总**\n路演 11:30 结束，评委散场前收齐打分表最省事。")
+            var p = ChatMessage(role: .assistant, text: "**今天值得看的两条**\n\n- DeepSeek 把联网搜索、文件解析、语音都开放成了 API，你们的运维助手可以直接接，[官方说明在这](https://api-docs.deepseek.com/zh-cn/news/news261113)。\n- 二号选手讲的“告警自闭环”，业内最近有一篇很细的复盘，和小美的思路很像，[可以对照着看](https://example.com/aiops)。")
+            p.time = at(10, 1)
             p.proactive = true
-            ChatStore.shared.seedDemo([
-                ChatMessage(role: .user, text: "今天我答应了别人什么？"),
-                a1,
-                p,
-            ])
+            p.suggestions = ["展开讲讲第一条", "调整我的资讯流"]
+            ChatStore.shared.seedDemo([q, a1, p])
         }
         let coordinator = DigestCoordinator.shared
         let steps: [(String, [Line])] = [(jsonA, a), (jsonB, b), (jsonC, c)]

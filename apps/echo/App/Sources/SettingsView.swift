@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 
 struct SettingsView: View {
     @EnvironmentObject private var store: Store
@@ -29,6 +30,14 @@ struct SettingsView: View {
     @ObservedObject private var connectors = Connectors.shared
     @ObservedObject private var chat = ChatStore.shared
     @AppStorage("proactiveEnabled") private var proactiveEnabled = true
+    @AppStorage("feedEnabled") private var feedEnabled = true
+    @AppStorage("ttsVoice") private var ttsVoice = "stella"
+    @AppStorage("speakReplies") private var speakReplies = true
+    @AppStorage("deepThink") private var deepThink = false
+    @ObservedObject private var profile = BuddyProfile.shared
+    @State private var buddyName = BuddyProfile.shared.name
+    @State private var buddyPhoto: PhotosPickerItem?
+    @State private var feedTopics = (UserDefaults.standard.stringArray(forKey: "feedTopics") ?? []).joined(separator: "、")
     @State private var addingConnector = false
     @State private var connectorName = ""
     @State private var connectorURL = ""
@@ -45,6 +54,7 @@ struct SettingsView: View {
                 speechSection
                 contextSection
                 digestSection
+                buddySection
                 agentSection
                 connectorSection
                 notifySection
@@ -150,11 +160,56 @@ struct SettingsView: View {
         }
     }
 
+    private var buddySection: some View {
+        Section {
+            HStack(spacing: 14) {
+                BuddyAvatar(mood: .idle, size: 56)
+                TextField("名字", text: $buddyName)
+                    .onSubmit { profile.rename(buddyName) }
+                    .onChange(of: buddyName) { _, value in profile.rename(value) }
+            }
+            PhotosPicker(selection: $buddyPhoto, matching: .images) {
+                Text(profile.photo == nil ? "换成我自己的照片" : "换一张照片")
+            }
+            .onChange(of: buddyPhoto) { _, item in
+                guard let item else { return }
+                Task {
+                    if let data = try? await item.loadTransferable(type: Data.self) { profile.setPhoto(data) }
+                    buddyPhoto = nil
+                }
+            }
+            if profile.photo != nil {
+                Button("用回会动的小白狗") { profile.clearPhoto() }
+            }
+            Picker("声音", selection: $ttsVoice) {
+                Text("海星（女声）").tag("stella")
+                Text("暗潮（男声）").tag("tide")
+                Text("系统语音（本机）").tag("system")
+            }
+            Toggle("我用语音说话时，它也出声回答", isOn: $speakReplies)
+            Toggle("深度思考", isOn: $deepThink)
+        } header: {
+            Text("它的样子和声音")
+        } footer: {
+            Text("头像默认是一只用代码画出来的小白狗：会呼吸、眨眼，想事情时歪头，说话时张嘴，听你说话时竖耳朵。语音输入和朗读用 DeepSeek 的语音识别与合成：你点麦克风后录下的那一段和要朗读的文字会发给 DeepSeek；选“系统语音”则朗读在本机完成。深度思考会让回答更细，但明显更慢。")
+        }
+    }
+
     private var agentSection: some View {
         Section {
             Toggle("主动提醒", isOn: $proactiveEnabled)
+            Toggle("资讯流推送", isOn: $feedEnabled)
+            if feedEnabled {
+                TextField("关心的话题，用顿号或逗号隔开", text: $feedTopics, axis: .vertical)
+                    .lineLimit(1...3)
+                    .onChange(of: feedTopics) { _, value in
+                        let list = value.components(separatedBy: CharacterSet(charactersIn: "、,，;；\n"))
+                            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                        UserDefaults.standard.set(Array(list.prefix(8)), forKey: "feedTopics")
+                    }
+            }
             if chat.memory.isEmpty {
-                Text("还没有让它记住的事。在对话里说“记住……”就行。").font(.footnote).foregroundStyle(.secondary)
+                Text("它还没记住什么。聊着聊着它会自己记下关于你的事，你也可以直接说“记住……”。").font(.footnote).foregroundStyle(.secondary)
             } else {
                 ForEach(chat.memory, id: \.self) { fact in
                     Text(fact).font(.subheadline)
@@ -165,7 +220,7 @@ struct SettingsView: View {
         } header: {
             Text("助理")
         } footer: {
-            Text("主动提醒：整理出新的一段对话、到了新地点，或系统给后台时间时，助理会自己看一眼有没有值得现在告诉你的事，有才发通知（8 点前和 23 点后不打扰，一天最多 6 条）。iOS 不允许 App 一直在后台运行，所以提醒的时机取决于这些事件。需要已配置云端智能体并允许通知。")
+            Text("资讯流：每天上午和傍晚各一次，它按你关心的话题和对你的了解联网找内容，有值得看的才发到对话里（也可以在对话里直接说“定制我的资讯流”）。它记住的事列在上面，左滑可以让它忘掉。\n主动提醒：整理出新的一段对话、到了新地点，或系统给后台时间时，助理会自己看一眼有没有值得现在告诉你的事，有才发通知（8 点前和 23 点后不打扰，一天最多 6 条）。iOS 不允许 App 一直在后台运行，所以提醒的时机取决于这些事件。需要已配置云端智能体并允许通知。")
         }
     }
 

@@ -19,7 +19,10 @@ final class Proactive {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: taskID, using: nil) { task in
             Task { @MainActor in
                 Proactive.scheduleRefresh()
-                let work = Task { @MainActor in await Proactive.shared.consider(reason: "系统给了后台时间") }
+                let work = Task { @MainActor in
+                    await Proactive.shared.consider(reason: "系统给了后台时间")
+                    await Proactive.shared.brief()
+                }
                 task.expirationHandler = { work.cancel() }
                 await work.value
                 task.setTaskCompleted(success: true)
@@ -59,6 +62,7 @@ final class Proactive {
             var out: (String, String)?
             let str: [String: Any] = ["type": "string"]
             var tools = assistant.readTools(collect: { _ in }, question: nil)
+            tools.append(contentsOf: Connectors.shared.agentTools(readOnly: true))
             tools.append(AgentTool(name: "notify", description: "发一条通知给我。只有现在说确实有用时才用。",
                                    parameters: ["type": "object", "properties": ["title": str, "body": str], "required": ["title", "body"]]) { args in
                 out = (String((args["title"] as? String ?? "").prefix(20)), String((args["body"] as? String ?? "").prefix(90)))
@@ -68,7 +72,7 @@ final class Proactive {
                                    parameters: ["type": "object", "properties": [String: Any]()]) { _ in
                 ToolResult(content: "好。", terminate: true)
             })
-            let agent = Agent(systemPrompt: await assistant.systemPrompt(proactive: true), tools: tools, model: try Cloud.model())
+            let agent = Agent(systemPrompt: await assistant.systemPrompt(proactive: true), tools: tools, model: try Cloud.model(thinking: false))
             agent.maxTurns = 6
             let sent = ChatStore.shared.messages.filter { $0.proactive && Calendar.current.isDateInToday($0.time) }.map { "- \($0.text)" }
             let already = sent.isEmpty ? "今天还没有提醒过我。" : "今天已经提醒过：\n" + sent.joined(separator: "\n")
@@ -82,6 +86,76 @@ final class Proactive {
             }
         } catch {
             // 主动检查失败不打扰你，下次再试
+        }
+    }
+
+    // MARK: 资讯流
+
+    static var feedEnabled: Bool {
+        UserDefaults.standard.object(forKey: "feedEnabled") as? Bool ?? true
+    }
+
+    /// 上午、傍晚各一档。这一档推过（或看过觉得没什么可推）就不再跑。
+    private func feedSlot() -> String? {
+        let hour = Calendar.current.component(.hour, from: Date())
+        guard hour >= 7, hour < 22 else { return nil }
+        return Store.dayKey(Date()) + (hour < 14 ? "-am" : "-pm")
+    }
+
+    /// 按你的话题和最近的经历，联网找值得看的内容推给你。打开 App 或系统给后台时间时触发。
+    func brief() async {
+        let d = UserDefaults.standard
+        guard Self.feedEnabled, Cloud.ready, Cloud.isDeepSeek, !Store.isDemo, !running, !Assistant.shared.busy else { return }
+        guard let slot = feedSlot(), d.string(forKey: "feedSlot") != slot else { return }
+        let topics = Assistant.feedTopics
+        let aboutMe = (d.string(forKey: "aboutMe") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !topics.isEmpty || !ChatStore.shared.memory.isEmpty || !aboutMe.isEmpty else { return }
+        running = true
+        defer { running = false }
+        d.set(slot, forKey: "feedSlot")
+        do {
+            let assistant = Assistant.shared
+            var out: (String, String)?
+            var sources: [WebSource] = []
+            let str: [String: Any] = ["type": "string"]
+            var tools = assistant.readTools(collect: { sources.append(contentsOf: $0) }, question: nil)
+            tools.append(contentsOf: Connectors.shared.agentTools(readOnly: true))
+            tools.append(AgentTool(name: "push", description: "把整理好的内容推给我。title 不超过 14 个字；body 是正文。",
+                                   parameters: ["type": "object", "properties": ["title": str, "body": str], "required": ["title", "body"]]) { args in
+                out = (String((args["title"] as? String ?? "").prefix(24)), String((args["body"] as? String ?? "").prefix(900)))
+                return ToolResult(content: "已推送。", terminate: true)
+            })
+            tools.append(AgentTool(name: "skip", description: "这次没有值得推的内容。",
+                                   parameters: ["type": "object", "properties": [String: Any]()]) { _ in
+                ToolResult(content: "好。", terminate: true)
+            })
+            var system = await assistant.systemPrompt(proactive: false)
+            system += """
+
+
+            这一次不是我在问你，而是到了你给我推送内容的时间。
+            根据我的资讯流话题（没设就根据你对我的了解和我最近在忙的事），联网搜索最近一两天的新消息，必要时打开网页核实，挑 2–4 条真正值得我看的。
+            每条一两句话：发生了什么、为什么跟我有关；把来源用 Markdown 链接嵌在句子里。口语一点，像朋友发消息，不要标题党，不要凑数。
+            写好后调用 push；实在没有新东西就调用 skip。不要重复之前推过的内容。这一轮不要调用 remember、suggest_replies。
+            """
+            let agent = Agent(systemPrompt: system, tools: tools, model: try Cloud.model(thinking: false))
+            agent.maxTurns = 8
+            let earlier = ChatStore.shared.messages.suffix(60).filter { $0.proactive }.suffix(4).map { "- " + String($0.text.prefix(160)) }
+            let already = earlier.isEmpty ? "之前还没有推过。" : "最近推过：\n" + earlier.joined(separator: "\n")
+            try await agent.prompt("到推送时间了。\(already)")
+            if let (title, body) = out, !body.isEmpty {
+                var message = ChatMessage(role: .assistant, text: title.isEmpty ? body : "**\(title)**\n\n\(body)")
+                message.proactive = true
+                var seen = Set<String>()
+                message.sources = sources.filter { !body.contains($0.url) && seen.insert($0.url).inserted }.prefix(3).map { $0 }
+                message.suggestions = ["展开讲讲第一条", "调整我的资讯流"]
+                ChatStore.shared.append(message)
+                let plain = Speaker.readable(body)
+                _ = await Pusher.now(title: title.isEmpty ? BuddyProfile.shared.name : title, body: String(plain.prefix(80)))
+            }
+        } catch {
+            // 这一档失败了就放开，下次打开再试
+            d.removeObject(forKey: "feedSlot")
         }
     }
 }

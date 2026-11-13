@@ -157,7 +157,7 @@ enum DigestAgent {
         if let submitted { return submitted }
         // 模型没走提交工具、直接把 JSON 写在回复里：也接受
         for m in agent.messages.reversed() {
-            if case let .assistant(text, _) = m, let text, text.contains("{") {
+            if case let .assistant(text, _, _) = m, let text, text.contains("{") {
                 let block = DigestEngine.parseBlock(text, lines: chunk)
                 if !block.chapters.isEmpty || !block.others.isEmpty { return block }
             }

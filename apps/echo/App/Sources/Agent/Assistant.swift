@@ -31,6 +31,22 @@ struct ChatMessage: Codable, Identifiable, Equatable {
     /// 智能体主动发来的
     var proactive = false
     var failed = false
+    // 下面几项是后来加的，必须是可选的，旧的对话记录才读得出来
+    /// 回答后给的快捷选项（点一下就发出去）
+    var suggestions: [String]?
+    /// 附件在 DeepSeek Files API 的 file_id
+    var fileID: String?
+    /// 这句是用语音说的
+    var spoken: Bool?
+    /// 被你中途停下的回答
+    var stopped: Bool?
+}
+
+/// 发给助理的文件。text 是本机能直接读出的文字；data 是原文件，交给 DeepSeek 解析。
+struct Attachment {
+    var name: String
+    var text: String?
+    var data: Data?
 }
 
 @MainActor
@@ -119,6 +135,13 @@ final class Assistant: ObservableObject {
     static let shared = Assistant()
     @Published var busy = false
     @Published var status: String?
+    /// 正在生成的回答（流式）
+    @Published var streaming = ""
+    private var job: Task<Void, Never>?
+
+    static var deepThink: Bool { UserDefaults.standard.bool(forKey: "deepThink") }
+    static var speakReplies: Bool { UserDefaults.standard.object(forKey: "speakReplies") as? Bool ?? true }
+    static var feedTopics: [String] { UserDefaults.standard.stringArray(forKey: "feedTopics") ?? [] }
 
     private let clock: DateFormatter = {
         let f = DateFormatter()
@@ -143,18 +166,23 @@ final class Assistant: ObservableObject {
         let here = await sensor.describe(from: now.addingTimeInterval(-3600), to: now.addingTimeInterval(60))
         let today = Store.shared.db.digests[Store.dayKey(now)]
         var parts: [String] = []
+        let name = BuddyProfile.shared.name
         parts.append("""
-        你是“拾言”，住在我 iPhone 和 Apple Watch 里的个人助理。我的手表会把我一天里身边的对话录下来转成文字，手机知道我去过哪、是在走路还是坐车、日程上有什么。
-        你能用工具查这些，也能联网。回答我之前，凡是涉及“我今天/最近说过什么、答应过什么、在哪、接下来有什么”的问题，先用工具查，不要凭空回答。
-        说话像一个靠谱的朋友：中文、简短、直接给结论；不确定就说不确定；不要编造我没说过的话。引用网上的信息时在句末用 Markdown 链接标出来源。
+        你叫“\(name)”，是住在我 iPhone 和 Apple Watch 里的常驻助理（App 叫“拾言”）。我的手表会把我一天里身边的对话录下来转成文字，手机知道我去过哪、是在走路还是坐车、日程上有什么。
+        你能用工具查这些，也能联网搜索、读网页、看图、读我发的文件，还能用我接入的连接器。凡是涉及“我今天/最近说过什么、答应过什么、在哪、接下来有什么”的问题，先用工具查，不要凭空回答；涉及最新消息、价格、事实的，先联网查。
+        说话像一个靠谱又亲近的朋友：中文、口语、简短，先给结论再给必要的理由；不确定就说不确定；不要编造我没说过的话。少用标题和长列表。引用网上的信息时用 Markdown 链接把来源嵌在句子里。
         写入提醒事项或日历必须用 propose_reminder / propose_event 提议，由我在界面上点确认，你不能替我确认。
-        我让你记住的长期信息用 remember 存下来。
+        持续了解我：对话里出现值得长期记住的关于我的事（偏好、习惯、家人同事是谁、在忙的项目、在意的事、固定安排），不用我开口，直接用 remember 记下来，一条一件事；发现记错了或过时了用 forget 删掉。临时的事不要记。
+        我说想看什么资讯、关心什么话题时，用 set_feed_topics 更新我的资讯流（传完整的新列表）。你会按它定时给我推送。
+        回答完如果有很自然的下一步，调用 suggest_replies 给我 2–3 个可以直接点的选项（每个不超过 12 个字，用我的口吻写，比如“帮我写进日历”）。没有就不用。
         """)
         parts.append("现在：\(clock.string(from: now))")
         let me = (d.string(forKey: "aboutMe") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !me.isEmpty { parts.append("关于我：\(me)") }
         let memory = ChatStore.shared.memory
-        if !memory.isEmpty { parts.append("我让你记住的事：\n" + memory.map { "- \($0)" }.joined(separator: "\n")) }
+        if !memory.isEmpty { parts.append("你记住的关于我的事：\n" + memory.map { "- \($0)" }.joined(separator: "\n")) }
+        let topics = Self.feedTopics
+        if !topics.isEmpty { parts.append("我的资讯流话题：" + topics.joined(separator: "、")) }
         if !here.isEmpty { parts.append("最近一小时的情境：\n\(here)") }
         if let scene = today?.scene, !scene.isEmpty { parts.append("今天的场合：\(scene)") }
         if proactive {
@@ -292,6 +320,9 @@ final class Assistant: ObservableObject {
         case "web_search": return "联网搜索…"
         case "web_fetch": return "读网页…"
         case "remember": return "记下来…"
+        case "forget": return "更新记忆…"
+        case "set_feed_topics": return "调整资讯流…"
+        case "suggest_replies": return "在整理回答…"
         case "schedule_notification": return "设定提醒…"
         case "propose_reminder", "propose_event": return "准备写入，等你确认…"
         default: return tool.hasPrefix("c") ? "调用连接器…" : "处理中…"
@@ -300,32 +331,63 @@ final class Assistant: ObservableObject {
 
     // MARK: 对话
 
-    func send(text: String, imageJPEG: Data? = nil, attachment: (name: String, text: String)? = nil) {
+    func stop() {
+        job?.cancel()
+    }
+
+    func send(text: String, imageJPEG: Data? = nil, attachment: Attachment? = nil, spoken: Bool = false) {
         let chat = ChatStore.shared
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !busy, !trimmed.isEmpty || imageJPEG != nil || attachment != nil else { return }
         var mine = ChatMessage(role: .user, text: trimmed)
         if let imageJPEG { mine.image = chat.saveImage(imageJPEG) }
         mine.attachment = attachment?.name
+        if spoken { mine.spoken = true }
+        let mineID = mine.id
         let history = Array(chat.messages.suffix(16))
         chat.append(mine)
         busy = true
+        streaming = ""
         status = "在想…"
+        Speaker.shared.stop()
 
-        Task { @MainActor in
+        job = Task { @MainActor in
             var proposals: [Proposal] = []
             var sources: [WebSource] = []
+            var suggestions: [String] = []
             var reply = ChatMessage(role: .assistant, text: "")
             do {
-                let model = try Cloud.model()
+                let model = try Cloud.model(thinking: Self.deepThink)
                 let str: [String: Any] = ["type": "string"]
+                let strings: [String: Any] = ["type": "array", "items": str]
                 func obj(_ props: [String: Any], _ required: [String]) -> [String: Any] { ["type": "object", "properties": props, "required": required] }
                 var tools = readTools(collect: { sources.append(contentsOf: $0) }, question: trimmed)
-                tools.append(AgentTool(name: "remember", description: "把一条关于我的长期信息记下来（偏好、人物关系、固定安排）。以后每次对话你都能看到。",
+                tools.append(AgentTool(name: "remember", description: "记下一条关于我的长期信息（偏好、习惯、人物关系、在忙的事、固定安排）。不用等我说“记住”，你觉得以后用得上就记。以后每次对话你都能看到。",
                                        parameters: obj(["fact": str], ["fact"])) { args in
                     let fact = args["fact"] as? String ?? ""
                     await MainActor.run { chat.remember(fact) }
                     return ToolResult(content: "记住了。")
+                })
+                tools.append(AgentTool(name: "forget", description: "删掉一条记错了或过时的记忆。fact 要和记忆里的原文一致。",
+                                       parameters: obj(["fact": str], ["fact"])) { args in
+                    let fact = (args["fact"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let found = await MainActor.run { () -> Bool in
+                        guard chat.memory.contains(fact) else { return false }
+                        chat.forget(fact)
+                        return true
+                    }
+                    return ToolResult(content: found ? "删掉了。" : "记忆里没有这一条原文。", isError: !found)
+                })
+                tools.append(AgentTool(name: "set_feed_topics", description: "设置我的资讯流话题（完整的新列表，最多 8 个，每个是一个具体的话题或关键词）。传空列表表示不再推送。",
+                                       parameters: obj(["topics": strings], ["topics"])) { args in
+                    let list = (args["topics"] as? [String] ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+                    UserDefaults.standard.set(Array(list.prefix(8)), forKey: "feedTopics")
+                    return ToolResult(content: list.isEmpty ? "已清空，不再推送资讯。" : "已更新。每天上午和傍晚各看一次，有值得看的才推。")
+                })
+                tools.append(AgentTool(name: "suggest_replies", description: "在回答下面给我 2–3 个可以直接点的后续选项。每个不超过 12 个字，用我的口吻。调用后照常写完你的回答。",
+                                       parameters: obj(["options": strings], ["options"])) { args in
+                    suggestions = (args["options"] as? [String] ?? []).map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(16)) }.filter { !$0.isEmpty }
+                    return ToolResult(content: "好，选项会显示在回答下面。现在直接写回答，不要在正文里重复这些选项。")
                 })
                 tools.append(AgentTool(name: "schedule_notification", description: "在指定时间给我发一条手机通知。time 格式 yyyy-MM-dd HH:mm，必须是将来。",
                                        parameters: obj(["time": str, "title": str, "body": str], ["time", "title"])) { args in
@@ -347,40 +409,93 @@ final class Assistant: ObservableObject {
                                               start: start, end: max(end, start), location: args["location"] as? String))
                     return ToolResult(content: "已放到界面上等我确认。告诉我点一下确认就行，不要说已经写入。")
                 })
-                tools.append(contentsOf: Connectors.shared.agentTools())
+                tools.append(contentsOf: Connectors.shared.agentTools(readOnly: false))
 
-                let agent = Agent(systemPrompt: await systemPrompt(proactive: false), tools: tools, model: model)
+                // 附件：能交给 DeepSeek 解析的（PDF、Word、PPT、表格、电子书）上传后用 file_id 引用；否则用本机读出的文字
+                var prompt = trimmed
+                var fileIDs: [String] = []
+                if let attachment {
+                    let ext = (attachment.name as NSString).pathExtension
+                    var uploaded = false
+                    if Cloud.isDeepSeek, Cloud.parsesRemotely(ext), let data = attachment.data {
+                        self.status = "解析文件…"
+                        do {
+                            let id = try await Cloud.uploadDocument(name: attachment.name, data: data)
+                            fileIDs = [id]
+                            uploaded = true
+                            chat.update(mineID) { $0.fileID = id }
+                        } catch {
+                            if attachment.text == nil { throw error }
+                        }
+                    }
+                    if !uploaded {
+                        guard let local = attachment.text, !local.isEmpty else {
+                            throw DigestError.unavailable("这个文件我读不出来。接上 DeepSeek 后可以解析 PDF、Word、PPT、表格。")
+                        }
+                        prompt += "\n\n【附件：\(attachment.name)】\n" + String(local.prefix(24_000))
+                    }
+                }
+                if prompt.isEmpty { prompt = imageJPEG != nil ? "看看这张图片。" : (attachment != nil ? "看看这个文件，告诉我要点。" : "（空）") }
+
+                var system = await systemPrompt(proactive: false)
+                if spoken {
+                    system += "\n\n我这句话是用语音说的（语音识别可能有错别字，按意思理解），你的回答会被朗读出来：像说话一样，两三句讲完，不用 Markdown、列表和链接。"
+                }
+                let agent = Agent(systemPrompt: system, tools: tools, model: model)
                 agent.maxTurns = 10
-                agent.seed(history.map { m -> AgentMessage in
+                let recent = Date().addingTimeInterval(-20 * 86_400)
+                agent.seed(history.filter { !$0.failed }.map { m -> AgentMessage in
                     var t = m.text
                     if m.image != nil { t += "\n［当时附了一张图片］" }
-                    if let a = m.attachment { t += "\n［当时附了文件：\(a)］" }
-                    return m.role == .user ? AgentMessage.user(t) : AgentMessage.assistant(text: t, toolCalls: [])
+                    if m.role == .user {
+                        if let id = m.fileID, m.time > recent, Cloud.isDeepSeek {
+                            return AgentMessage.userWithFiles(t.isEmpty ? "看看这个文件。" : t, [], [id])
+                        }
+                        if let a = m.attachment { t += "\n［当时附了文件：\(a)］" }
+                        return AgentMessage.user(t.isEmpty ? "（空）" : t)
+                    }
+                    return AgentMessage.assistant(text: t, toolCalls: [], reasoning: nil)
                 })
+                agent.onPartial = { text in
+                    self.streaming = text
+                    self.status = nil
+                }
                 agent.subscribe { event in
                     switch event {
-                    case .toolExecutionStart(_, let name, _): self.status = self.statusText(name)
-                    case .turnStart(let n): if n > 1 { self.status = "在整理回答…" }
+                    case .toolExecutionStart(_, let name, _):
+                        self.status = self.statusText(name)
+                    case .turnStart(let n):
+                        if n > 1 {
+                            self.streaming = ""
+                            self.status = "在整理回答…"
+                        }
                     default: break
                     }
                 }
-                var prompt = trimmed
-                if let attachment {
-                    prompt += "\n\n【附件：\(attachment.name)】\n" + String(attachment.text.prefix(24_000))
-                }
-                if prompt.isEmpty { prompt = imageJPEG != nil ? "看看这张图片。" : "（空）" }
-                try await agent.prompt(prompt, images: imageJPEG.map { [$0] } ?? [])
+                try await agent.prompt(prompt, images: imageJPEG.map { [$0] } ?? [], fileIDs: fileIDs)
                 reply.text = agent.lastText ?? (proposals.isEmpty ? "我没想出该怎么回答，换个说法再问我一次。" : "准备好了，点下面确认。")
             } catch {
-                reply.text = error.localizedDescription
-                reply.failed = true
+                let partial = self.streaming.trimmingCharacters(in: .whitespacesAndNewlines)
+                if Task.isCancelled || (error as? URLError)?.code == .cancelled || error is CancellationError {
+                    reply.text = partial.isEmpty ? "（已停下）" : partial
+                    reply.stopped = true
+                } else {
+                    reply.text = error.localizedDescription
+                    reply.failed = true
+                }
             }
             reply.proposals = proposals
+            if !suggestions.isEmpty && !reply.failed { reply.suggestions = Array(suggestions.prefix(3)) }
             var seen = Set<String>()
             reply.sources = sources.filter { reply.text.contains($0.url) == false && seen.insert($0.url).inserted }.prefix(4).map { $0 }
+            self.streaming = ""
             chat.append(reply)
             self.busy = false
             self.status = nil
+            self.job = nil
+            if spoken, Self.speakReplies, !reply.failed, reply.stopped != true {
+                Speaker.shared.speak(reply.text, id: reply.id)
+            }
         }
     }
 

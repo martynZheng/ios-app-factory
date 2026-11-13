@@ -16,6 +16,8 @@ struct ConnectorTool: Codable, Equatable {
     var description: String
     /// JSON Schema 原文
     var schema: String
+    /// 服务方声明这个工具只读（annotations.readOnlyHint）。旧数据里没有这一项。
+    var readOnly: Bool?
 }
 
 @MainActor
@@ -74,8 +76,9 @@ final class Connectors: ObservableObject {
                 let fallback: [String: Any] = ["type": "object", "properties": [String: Any]()]
                 let schema: Any = t["inputSchema"] ?? fallback
                 let data = (try? JSONSerialization.data(withJSONObject: schema)) ?? Data("{}".utf8)
+                let hint = (t["annotations"] as? [String: Any])?["readOnlyHint"] as? Bool
                 return ConnectorTool(name: name, description: String((t["description"] as? String ?? "").prefix(600)),
-                                     schema: String(data: data, encoding: .utf8) ?? "{}")
+                                     schema: String(data: data, encoding: .utf8) ?? "{}", readOnly: hint)
             }
             update(id) { $0.tools = tools; $0.lastError = nil }
         } catch {
@@ -90,10 +93,12 @@ final class Connectors: ObservableObject {
     }
 
     /// 给智能体用的工具。名字加上连接器前缀，避免重名。
-    func agentTools() -> [AgentTool] {
+    /// readOnly = true：只给声明了只读的工具（助理自己醒来时用，不让它在没人看着的时候改东西）。
+    func agentTools(readOnly: Bool) -> [AgentTool] {
         var out: [AgentTool] = []
         for (n, c) in list.enumerated() where c.enabled {
             for t in c.tools.prefix(24) {
+                if readOnly && t.readOnly != true { continue }
                 let schema = (try? JSONSerialization.jsonObject(with: Data(t.schema.utf8))) as? [String: Any] ?? ["type": "object"]
                 let safe = String(t.name.map { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" ? $0 : "_" }.prefix(48))
                 out.append(AgentTool(name: "c\(n)_\(safe)", description: "【连接器：\(c.name)】\(t.description)", parameters: schema) { [weak self] args in

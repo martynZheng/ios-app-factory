@@ -44,6 +44,7 @@ targets:
         NSFaceIDUsageDescription: 用面容 ID 保护你的对话记录。
         UIAppFonts: [InkSerif.otf]
         NSCameraUsageDescription: 拍一张照片发给助理，让它识别上面的文字或内容。
+        NSMicrophoneUsageDescription: 只有在你点对话页的麦克风后才会录音，用来把你说的话转成文字发给助理；录音时界面会一直显示计时。
         UIBackgroundModes: [fetch]
         BGTaskSchedulerPermittedIdentifiers: [com.deffisoan.echo.refresh]
         NSLocationWhenInUseUsageDescription: 记录你到访过的地点，用来判断每段对话发生在哪里（会议室、路上、家里）。只存在本机。

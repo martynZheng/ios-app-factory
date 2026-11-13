@@ -53,6 +53,7 @@ struct EchoApp: App {
                     store.cleanupAudio(olderThanDays: retentionDays)
                     transcriber.kick()
                     coordinator.updateRecent()
+                    Task { await Proactive.shared.brief() }
                 case .background:
                     Proactive.scheduleRefresh()
                     if appLock { locked = true }
@@ -95,7 +96,7 @@ struct RootView: View {
     private func tab<V: View>(_ index: Int, _ title: String, _ symbol: String, @ViewBuilder content: () -> V) -> some View {
         NavigationStack {
             content()
-                .navigationTitle(index == 0 ? "" : (index == 3 ? "拾言" : title))
+                .navigationTitle(index == 0 || index == 3 ? "" : title)
                 .navigationBarTitleDisplayMode(index == 1 || index == 2 ? .large : .inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
