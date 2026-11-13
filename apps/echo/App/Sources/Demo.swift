@@ -81,6 +81,17 @@ enum Demo {
         "todos":[{"text":"会后汇总六支队伍的评分表并发给评委组","owner":"汯毅","due":"周五","sources":[0]}],
         "pending":[{"text":"场地下周还能不能用，需要跟行政确认","sources":[2]}]}
         """
+        Task { @MainActor in
+            var a1 = ChatMessage(role: .assistant, text: "今天你明确答应的只有一件：**会后汇总六支队伍的评分表，周五前发给评委组**（中场休息时说的）。\n另外有一件还没定：场地下周能不能用，要跟行政确认。")
+            a1.proposals = [Proposal(kind: .reminder, title: "汇总评分表发给评委组", notes: nil, start: at(17, 0))]
+            var p = ChatMessage(role: .assistant, text: "**评分表还没汇总**\n路演 11:30 结束，评委散场前收齐打分表最省事。")
+            p.proactive = true
+            ChatStore.shared.seedDemo([
+                ChatMessage(role: .user, text: "今天我答应了别人什么？"),
+                a1,
+                p,
+            ])
+        }
         let coordinator = DigestCoordinator.shared
         let steps: [(String, [Line])] = [(jsonA, a), (jsonB, b), (jsonC, c)]
         if UserDefaults.standard.bool(forKey: "grow") {

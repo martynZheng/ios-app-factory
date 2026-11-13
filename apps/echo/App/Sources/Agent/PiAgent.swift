@@ -17,6 +17,8 @@ struct ToolCall: Equatable {
 
 enum AgentMessage {
     case user(String)
+    /// 带图片的用户消息（JPEG 数据）。图片只能出现在 user 消息里。
+    case userWithImages(String, [Data])
     case assistant(text: String?, toolCalls: [ToolCall])
     case toolResult(callID: String, name: String, content: String, isError: Bool)
 }
@@ -70,16 +72,19 @@ final class Agent {
     }
 
     func subscribe(_ listener: @escaping (AgentEvent) -> Void) { listeners.append(listener) }
+    /// 续上之前的对话（只放文字，不放工具过程）。
+    func seed(_ history: [AgentMessage]) { messages = history }
     func steer(_ text: String) { steering.append(text) }
 
     private func emit(_ event: AgentEvent) { for l in listeners { l(event) } }
 
     /// 跑完整个循环。返回停止原因：stop（模型自己停）/ terminate（收尾工具结束）/ max_turns。
     @discardableResult
-    func prompt(_ text: String) async throws -> String {
-        messages.append(.user(text))
+    func prompt(_ text: String, images: [Data] = []) async throws -> String {
+        let first: AgentMessage = images.isEmpty ? .user(text) : .userWithImages(text, images)
+        messages.append(first)
         emit(.agentStart)
-        emit(.messageEnd(.user(text)))
+        emit(.messageEnd(first))
         var turn = 0
         var reason = "max_turns"
         loop: while turn < maxTurns {
@@ -123,6 +128,14 @@ final class Agent {
         return reason
     }
 
+    /// 最后一条助手文字回复。
+    var lastText: String? {
+        for m in messages.reversed() {
+            if case let .assistant(text, _) = m, let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return text }
+        }
+        return nil
+    }
+
     private func drainSteering() {
         for s in steering {
             messages.append(.user(s))
@@ -150,6 +163,13 @@ struct OpenAICompatModel: ChatModel {
             switch m {
             case .user(let text):
                 wire.append(["role": "user", "content": text])
+            case .userWithImages(let text, let images):
+                var blocks: [[String: Any]] = [["type": "text", "text": text]]
+                for data in images {
+                    let url: [String: Any] = ["url": "data:image/jpeg;base64," + data.base64EncodedString()]
+                    blocks.append(["type": "image_url", "image_url": url])
+                }
+                wire.append(["role": "user", "content": blocks])
             case .assistant(let text, let calls):
                 var msg: [String: Any] = ["role": "assistant", "content": text ?? ""]
                 if !calls.isEmpty {

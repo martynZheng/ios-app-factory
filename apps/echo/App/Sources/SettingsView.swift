@@ -26,6 +26,13 @@ struct SettingsView: View {
     @AppStorage("senseMotion") private var senseMotion = false
     @AppStorage("senseCalendar") private var senseCalendar = false
     @ObservedObject private var sensor = ContextSensor.shared
+    @ObservedObject private var connectors = Connectors.shared
+    @ObservedObject private var chat = ChatStore.shared
+    @AppStorage("proactiveEnabled") private var proactiveEnabled = true
+    @State private var addingConnector = false
+    @State private var connectorName = ""
+    @State private var connectorURL = ""
+    @State private var connectorToken = ""
 
     @State private var cloudKey = Keychain.get("cloudKey") ?? ""
     @State private var exportURL: URL?
@@ -38,6 +45,8 @@ struct SettingsView: View {
                 speechSection
                 contextSection
                 digestSection
+                agentSection
+                connectorSection
                 notifySection
                 privacySection
                 aboutSection
@@ -125,7 +134,7 @@ struct SettingsView: View {
                 Toggle("启用云端智能体", isOn: $cloudEnabled)
                 Button("填入 DeepSeek 预设") {
                     cloudURL = "https://api.deepseek.com"
-                    cloudModel = "deepseek-chat"
+                    cloudModel = "deepseek-flash"
                 }
                 TextField("服务地址（https://…/v1）", text: $cloudURL)
                     .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
@@ -139,6 +148,77 @@ struct SettingsView: View {
         } footer: {
             Text(digestFooter)
         }
+    }
+
+    private var agentSection: some View {
+        Section {
+            Toggle("主动提醒", isOn: $proactiveEnabled)
+            if chat.memory.isEmpty {
+                Text("还没有让它记住的事。在对话里说“记住……”就行。").font(.footnote).foregroundStyle(.secondary)
+            } else {
+                ForEach(chat.memory, id: \.self) { fact in
+                    Text(fact).font(.subheadline)
+                        .swipeActions { Button("忘掉", role: .destructive) { chat.forget(fact) } }
+                }
+            }
+            Button("清空对话记录", role: .destructive) { chat.clear() }
+        } header: {
+            Text("助理")
+        } footer: {
+            Text("主动提醒：整理出新的一段对话、到了新地点，或系统给后台时间时，助理会自己看一眼有没有值得现在告诉你的事，有才发通知（8 点前和 23 点后不打扰，一天最多 6 条）。iOS 不允许 App 一直在后台运行，所以提醒的时机取决于这些事件。需要已配置云端智能体并允许通知。")
+        }
+    }
+
+    private var connectorSection: some View {
+        Section {
+            ForEach(connectors.list) { c in
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle(c.name, isOn: Binding(get: { c.enabled }, set: { connectors.setEnabled(c.id, $0) }))
+                    Text(connectorStatus(c))
+                        .font(.caption)
+                        .foregroundStyle(c.lastError == nil ? Color.secondary : Ink.vermilion)
+                    Button("重新连接") { Task { await connectors.refresh(c.id) } }.font(.caption)
+                }
+                .swipeActions { Button("删除", role: .destructive) { connectors.remove(c.id) } }
+            }
+            Button("添加连接器") { addingConnector = true }
+        } header: {
+            Text("连接器")
+        } footer: {
+            Text("接入一个远程 MCP 服务（https 地址，可选访问令牌），助理就能调用它提供的工具，比如你自己的知识库、工单、云盘。已内置：联网搜索、读网页、看图、读文件、日程、提醒事项、位置与状态。令牌只存在本机钥匙串。")
+        }
+        .sheet(isPresented: $addingConnector) {
+            NavigationStack {
+                Form {
+                    TextField("名字，如：我的知识库", text: $connectorName)
+                    TextField("MCP 地址（https://…）", text: $connectorURL)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                    SecureField("访问令牌（可选）", text: $connectorToken)
+                }
+                .navigationTitle("添加连接器")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) { Button("取消") { addingConnector = false } }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("连接") {
+                            let c = connectors.add(name: connectorName.isEmpty ? "连接器" : connectorName, url: connectorURL, token: connectorToken)
+                            connectorName = ""; connectorURL = ""; connectorToken = ""
+                            addingConnector = false
+                            Task { await connectors.refresh(c.id) }
+                        }
+                        .disabled(!connectorURL.lowercased().hasPrefix("https://"))
+                    }
+                }
+            }
+            .presentationDetents([.medium])
+        }
+    }
+
+    private func connectorStatus(_ c: Connector) -> String {
+        if let error = c.lastError { return error }
+        if c.tools.isEmpty { return "还没读到工具，点“重新连接”" }
+        let names = c.tools.prefix(4).map { $0.name }.joined(separator: "、")
+        return "\(c.tools.count) 个工具：\(names)"
     }
 
     private var digestFooter: String {
@@ -201,6 +281,8 @@ struct SettingsView: View {
             Button("全部删除", role: .destructive) {
                 store.deleteAll()
                 sensor.deleteAll()
+                chat.clear()
+                chat.forgetAll()
                 exportURL = nil
             }
             Button("取消", role: .cancel) {}

@@ -457,17 +457,7 @@ final class DigestCoordinator: ObservableObject {
     }
 
     /// full = 丢弃当天已有回顾，整天重新整理；force = 不等攒够，现在就整理新增内容。
-    static func cloudModel() throws -> ChatModel {
-        let d = UserDefaults.standard
-        guard d.bool(forKey: "cloudEnabled") else { throw DigestError.unavailable("云端智能体未启用。") }
-        let base = (d.string(forKey: "cloudURL") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let model = (d.string(forKey: "cloudModel") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let key = Keychain.get("cloudKey") ?? ""
-        guard !base.isEmpty, !model.isEmpty, !key.isEmpty else {
-            throw DigestError.unavailable("请先在设置里填写云端服务地址、模型名和密钥。")
-        }
-        return OpenAICompatModel(baseURL: base, model: model, apiKey: key)
-    }
+    static func cloudModel() throws -> ChatModel { try Cloud.model() }
 
     func update(day: String, full: Bool = false, force: Bool = false) {
         let store = Store.shared
@@ -531,6 +521,7 @@ final class DigestCoordinator: ObservableObject {
             self.agentStatus = nil
             self.working = false
             Notifier.apply()
+            if self.lastError == nil { await Proactive.shared.consider(reason: "刚整理出新的一段对话") }
         }
     }
 }

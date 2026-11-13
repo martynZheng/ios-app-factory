@@ -52,6 +52,7 @@ kill -9 $REC 2>/dev/null || true
 echo "video done"
 
 shot today
+shot chat -tab 3
 shot today-bottom -scroll 1
 shot chapter -chapter 1
 shot timeline -tab 1
@@ -59,4 +60,5 @@ shot todos -tab 2
 limit 30 xcrun simctl ui "$DEV" appearance dark || true
 shot today-dark-bottom -scroll 1
 shot timeline-dark -tab 1
+shot chat-dark -tab 3
 ls -la "$OUT"

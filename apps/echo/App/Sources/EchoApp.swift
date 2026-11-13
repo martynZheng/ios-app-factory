@@ -19,6 +19,8 @@ struct EchoApp: App {
         if Store.isDemo { Demo.seed() }
         DigestCoordinator.shared.start()
         ContextSensor.shared.start()
+        Cloud.migrate()
+        Proactive.register()
         Self.styleNavigationBars()
     }
 
@@ -52,6 +54,7 @@ struct EchoApp: App {
                     transcriber.kick()
                     coordinator.updateRecent()
                 case .background:
+                    Proactive.scheduleRefresh()
                     if appLock { locked = true }
                     store.saveNow()
                     player.stop()
@@ -77,12 +80,13 @@ struct EchoApp: App {
 
 struct RootView: View {
     @State private var showSettings = false
-    @State private var selection = Store.isDemo ? UserDefaults.standard.integer(forKey: "tab") : 0
+    @State private var selection = Store.isDemo ? UserDefaults.standard.integer(forKey: "tab") : 3
 
     var body: some View {
         TabView(selection: $selection) {
+            tab(3, "对话", "bubble.left") { ChatView() }
             tab(0, "今日回顾", "sun.max") { TodayView() }
-            tab(1, "时间线", "text.alignleft") { TranscriptView() }
+            tab(1, "原话", "text.alignleft") { TranscriptView() }
             tab(2, "待办", "checklist") { TodosView() }
         }
         .sheet(isPresented: $showSettings) { SettingsView() }
@@ -91,8 +95,8 @@ struct RootView: View {
     private func tab<V: View>(_ index: Int, _ title: String, _ symbol: String, @ViewBuilder content: () -> V) -> some View {
         NavigationStack {
             content()
-                .navigationTitle(index == 0 ? "" : title)
-                .navigationBarTitleDisplayMode(index == 0 ? .inline : .large)
+                .navigationTitle(index == 0 ? "" : (index == 3 ? "拾言" : title))
+                .navigationBarTitleDisplayMode(index == 1 || index == 2 ? .large : .inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button { showSettings = true } label: { Image(systemName: "gearshape") }
