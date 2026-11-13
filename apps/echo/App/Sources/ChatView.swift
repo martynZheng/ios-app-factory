@@ -75,7 +75,7 @@ struct ChatView: View {
                         .onDisappear { bottomVisible = false }
                 }
                 .padding(.horizontal, 16)
-                .padding(.top, 84)
+                .padding(.top, 104)
                 .padding(.bottom, 6)
                 .animation(.spring(response: 0.42, dampingFraction: 0.86), value: chat.messages.count)
             }
@@ -144,15 +144,16 @@ struct ChatView: View {
 
     private var header: some View {
         ZStack(alignment: .top) {
-            LinearGradient(colors: [Chat.page, Chat.page.opacity(0.92), Chat.page.opacity(0)], startPoint: .top, endPoint: .bottom)
-                .frame(height: 118)
+            LinearGradient(stops: [.init(color: Chat.page, location: 0), .init(color: Chat.page.opacity(0.96), location: 0.62),
+                                   .init(color: Chat.page.opacity(0), location: 1)], startPoint: .top, endPoint: .bottom)
+                .frame(height: 176)
                 .padding(.top, -60)
                 .allowsHitTesting(false)
             BuddyHeader(mood: mood, caption: caption) {
                 nameDraft = profile.name
                 renaming = true
             }
-            .padding(.top, -34)
+            .padding(.top, -14)
         }
         .frame(maxWidth: .infinity)
     }
