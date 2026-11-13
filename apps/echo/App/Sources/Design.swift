@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - 设计基础
 
 /// 一天里的光：凌晨靛蓝 → 清晨杏色 → 上午金 → 正午天蓝 → 傍晚橘 → 入夜紫。
-/// 鱼骨图上每一章的颜色取自它发生的时刻，整条脊柱就是这一天的天色。
+/// 时间线上每一段的圆点颜色取自它发生的时刻。
 enum Daylight {
     private static let stops: [(Double, (Double, Double, Double))] = [
         (0, (0.30, 0.34, 0.78)), (5, (0.94, 0.58, 0.40)), (9, (0.90, 0.62, 0.14)),
@@ -52,12 +52,15 @@ enum Paper {
             ? UIColor(red: 0.110, green: 0.133, blue: 0.196, alpha: 1)
             : UIColor.white
     })
+    static let rail = Color(UIColor { t in
+        t.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.16) : UIColor(white: 0, alpha: 0.12)
+    })
     static let hairline = Color(UIColor { t in
         t.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.08) : UIColor(white: 0, alpha: 0.06)
     })
 }
 
-/// 斜着的小骨头：要点、子项前面的记号，和鱼骨图的肋骨同一个笔势。
+/// 斜着的小记号：章节详情里要点前面的标记。
 struct Twig: Shape {
     func path(in rect: CGRect) -> Path {
         var p = Path()

@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 今日回顾：页头（这一天在干什么）→ 要跟进的 → 这一天的经过（竖向鱼骨图，往下生长）。
+/// 今日回顾：页头（这一天在干什么）→ 要跟进的 → 这一天的经过（往下延展的时间线）。
 struct TodayView: View {
     @EnvironmentObject private var store: Store
     @EnvironmentObject private var coordinator: DigestCoordinator
@@ -44,10 +44,10 @@ struct TodayView: View {
                                 .padding(.horizontal, 22)
                                 .padding(.top, 12)
                         } else {
-                            FishboneView(chapters: chapters, items: digest?.items ?? [], live: isLive, namespace: zoom) { chapter = $0 }
+                            DayFlowView(chapters: chapters, items: digest?.items ?? [], live: isLive, namespace: zoom) { chapter = $0 }
                                 .id(day)
-                                .padding(.horizontal, 14)
-                                .padding(.top, 14)
+                                .padding(.horizontal, 22)
+                                .padding(.top, 18)
                         }
                         tools
                             .padding(.horizontal, 22)
@@ -63,12 +63,12 @@ struct TodayView: View {
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: chapters.count) { old, new in
                 guard new > old else { return }
-                withAnimation(.smooth(duration: 0.65)) { proxy.scrollTo("fish-head", anchor: .bottom) }
+                withAnimation(.smooth(duration: 0.65)) { proxy.scrollTo("flow-end", anchor: .bottom) }
             }
             .onAppear {
                 coordinator.update(day: day)
                 if Store.isDemo, UserDefaults.standard.bool(forKey: "scroll") {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { proxy.scrollTo("fish-head", anchor: .bottom) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { proxy.scrollTo("flow-end", anchor: .bottom) }
                 }
                 if Store.isDemo, UserDefaults.standard.object(forKey: "chapter") != nil {
                     chapter = store.db.digests[day]?.chapters?[safe: UserDefaults.standard.integer(forKey: "chapter")]
