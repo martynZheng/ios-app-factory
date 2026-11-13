@@ -9,6 +9,8 @@ struct TranscriptView: View {
     @State private var query = ""
     @State private var editing: Line?
     @State private var draft = ""
+    @State private var topVisible = true
+    @State private var bottomVisible = true
 
     private struct Cluster: Identifiable {
         let id: UUID
@@ -30,8 +32,7 @@ struct TranscriptView: View {
     /// 按天分组，再把间隔不超过 90 秒、同一次录音的句子并成一簇。
     private var days: [Day] {
         let q = query.trimmingCharacters(in: .whitespaces)
-        let all = (q.isEmpty ? store.db.lines : store.db.lines.filter { $0.text.localizedCaseInsensitiveContains(q) })
-            .sorted { $0.time < $1.time }
+        let all = q.isEmpty ? store.sortedLines : store.sortedLines.filter { $0.text.localizedCaseInsensitiveContains(q) }
         var result: [Day] = []
         var dayKey = ""
         var clusters: [Cluster] = []
@@ -68,6 +69,9 @@ struct TranscriptView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
+                        Color.clear.frame(height: 1).id("top")
+                            .onAppear { topVisible = true }
+                            .onDisappear { topVisible = false }
                         banners
                         if groups.isEmpty {
                             emptyState.padding(.top, 80)
@@ -75,6 +79,7 @@ struct TranscriptView: View {
                         ForEach(groups) { day in
                             DayChip(text: dayLabel(day.id))
                                 .frame(maxWidth: .infinity)
+                                .id("day-" + day.id)
                                 .padding(.top, 14)
                                 .padding(.bottom, 10)
                             ForEach(day.clusters) { cluster in
@@ -83,14 +88,40 @@ struct TranscriptView: View {
                             }
                         }
                         Color.clear.frame(height: 1).id("bottom")
+                            .onAppear { bottomVisible = true }
+                            .onDisappear { bottomVisible = false }
                     }
                     .padding(.horizontal, 12)
                     .animation(.spring(response: 0.45, dampingFraction: 0.86), value: store.db.lines.count)
                 }
                 .defaultScrollAnchor(.bottom)
                 .scrollDismissesKeyboard(.interactively)
+                .overlay(alignment: .bottomTrailing) {
+                    JumpButtons(showTop: !topVisible, showBottom: !bottomVisible,
+                                onTop: { withAnimation(.smooth(duration: 0.5)) { proxy.scrollTo("top", anchor: .top) } },
+                                onBottom: { withAnimation(.smooth(duration: 0.5)) { proxy.scrollTo("bottom", anchor: .bottom) } })
+                        .padding(.trailing, 16)
+                        .padding(.bottom, 14)
+                }
+                .toolbar {
+                    if groups.count > 1 {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Menu {
+                                ForEach(groups.reversed()) { day in
+                                    Button(dayLabel(day.id)) {
+                                        withAnimation(.smooth(duration: 0.5)) { proxy.scrollTo("day-" + day.id, anchor: .top) }
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "calendar")
+                            }
+                            .accessibilityLabel("跳到某一天")
+                        }
+                    }
+                }
                 .onChange(of: store.db.lines.count) { old, new in
-                    guard new > old, query.isEmpty else { return }
+                    // 停在底部时才跟随新内容，往上翻看时不打断
+                    guard new > old, query.isEmpty, bottomVisible else { return }
                     withAnimation(.smooth(duration: 0.5)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
             }

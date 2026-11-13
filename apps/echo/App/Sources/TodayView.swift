@@ -12,6 +12,9 @@ struct TodayView: View {
     @State private var contextDraft = ""
     @State private var confirmFull = false
     @State private var confirmRetranscribe = false
+    @State private var headerVisible = true
+    @State private var endVisible = false
+    @ObservedObject private var sensor = ContextSensor.shared
     @Namespace private var zoom
 
     private static let dateTitle: DateFormatter = {
@@ -27,10 +30,13 @@ struct TodayView: View {
         let chapters = digest?.chapters ?? []
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     header(digest, hasLines: hasLines)
                         .padding(.horizontal, 22)
                         .padding(.top, 6)
+                        .id("top")
+                        .onAppear { headerVisible = true }
+                        .onDisappear { headerVisible = false }
                     if hasLines {
                         followUps(digest)
                             .padding(.horizontal, 22)
@@ -53,6 +59,9 @@ struct TodayView: View {
                             .padding(.horizontal, 22)
                             .padding(.top, 30)
                             .padding(.bottom, 24)
+                            .id("bottom")
+                            .onAppear { endVisible = true }
+                            .onDisappear { endVisible = false }
                     } else {
                         empty.padding(.horizontal, 22).padding(.top, 48)
                     }
@@ -61,14 +70,22 @@ struct TodayView: View {
                 .animation(.spring(response: 0.5, dampingFraction: 0.88), value: digest?.items.count ?? 0)
             }
             .scrollDismissesKeyboard(.interactively)
+            .overlay(alignment: .bottomTrailing) {
+                JumpButtons(showTop: !headerVisible, showBottom: hasLines && !chapters.isEmpty && !endVisible,
+                            onTop: { withAnimation(.smooth(duration: 0.5)) { proxy.scrollTo("top", anchor: .top) } },
+                            onBottom: { withAnimation(.smooth(duration: 0.5)) { proxy.scrollTo("bottom", anchor: .bottom) } })
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 14)
+            }
             .onChange(of: chapters.count) { old, new in
-                guard new > old else { return }
-                withAnimation(.smooth(duration: 0.65)) { proxy.scrollTo("flow-end", anchor: .bottom) }
+                // 只有本来就停在底部时才跟着往下走；正在往上翻看时不打断
+                guard new > old, endVisible else { return }
+                withAnimation(.smooth(duration: 0.65)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onAppear {
                 coordinator.update(day: day)
                 if Store.isDemo, UserDefaults.standard.bool(forKey: "scroll") {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { proxy.scrollTo("flow-end", anchor: .bottom) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
                 if Store.isDemo, UserDefaults.standard.object(forKey: "chapter") != nil {
                     chapter = store.db.digests[day]?.chapters?[safe: UserDefaults.standard.integer(forKey: "chapter")]
@@ -131,7 +148,7 @@ struct TodayView: View {
             .font(.subheadline)
             .foregroundStyle(Ink.ink)
             .padding(.leading, -8)
-            StudyVignette(live: isLive)
+            StudyVignette(live: isLive, visible: headerVisible)
                 .frame(maxWidth: 560)
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, -10)
@@ -143,6 +160,17 @@ struct TodayView: View {
                 .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
                 .contentTransition(.opacity)
+            if let route = footprint {
+                Label {
+                    Text(route)
+                } icon: {
+                    Image(systemName: "point.topleft.down.to.point.bottomright.curvepath")
+                }
+                .labelStyle(TightLabel())
+                .font(.footnote)
+                .foregroundStyle(Ink.ink2)
+                .lineLimit(2)
+            }
             if hasLines {
                 Text(statusText(digest))
                     .font(.footnote)
@@ -168,8 +196,15 @@ struct TodayView: View {
         .animation(.snappy, value: day)
     }
 
+    /// 这一天依次去过的地方。
+    private var footprint: String? {
+        let start = Store.date(fromDayKey: day)
+        let places = sensor.places(from: start, to: start.addingTimeInterval(86_400)).map { $0.1 }
+        return places.isEmpty ? nil : places.joined(separator: " → ")
+    }
+
     private func statusText(_ digest: Digest?) -> String {
-        if coordinator.working { return "正在整理新内容…" }
+        if coordinator.working { return coordinator.agentStatus ?? "正在整理新内容…" }
         if transcriber.busy { return "正在转写…" }
         let waiting = coordinator.unprocessedCount(day: day)
         let base = digest?.stats ?? DigestEngine.stats(lines: store.lines(on: day), segments: store.segments(on: day))
@@ -331,6 +366,38 @@ extension View {
         self.padding(14)
             .frame(maxWidth: .infinity)
             .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Paper.bubble))
+    }
+}
+
+/// 回到顶部 / 跳到最新。
+struct JumpButtons: View {
+    let showTop: Bool
+    let showBottom: Bool
+    let onTop: () -> Void
+    let onBottom: () -> Void
+
+    var body: some View {
+        VStack(spacing: 10) {
+            if showTop { button("arrow.up", "回到顶部", onTop) }
+            if showBottom { button("arrow.down", "跳到最新", onBottom) }
+        }
+        .animation(.snappy(duration: 0.25), value: showTop)
+        .animation(.snappy(duration: 0.25), value: showBottom)
+    }
+
+    private func button(_ symbol: String, _ label: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Ink.ink)
+                .frame(width: 42, height: 42)
+                .background(Circle().fill(Ink.paper))
+                .overlay(InkRing(seed: symbol.count == 8 ? 1 : 4).stroke(Ink.ink.opacity(0.7), lineWidth: 1).padding(1))
+                .shadow(color: .black.opacity(0.10), radius: 8, y: 2)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .transition(.scale(scale: 0.6).combined(with: .opacity))
     }
 }
 

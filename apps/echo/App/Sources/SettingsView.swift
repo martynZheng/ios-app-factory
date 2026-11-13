@@ -22,6 +22,11 @@ struct SettingsView: View {
     @AppStorage("appLock") private var appLock = false
     @AppStorage("retentionDays") private var retentionDays = 30
 
+    @AppStorage("senseLocation") private var senseLocation = false
+    @AppStorage("senseMotion") private var senseMotion = false
+    @AppStorage("senseCalendar") private var senseCalendar = false
+    @ObservedObject private var sensor = ContextSensor.shared
+
     @State private var cloudKey = Keychain.get("cloudKey") ?? ""
     @State private var exportURL: URL?
     @State private var confirmDeleteAll = false
@@ -31,6 +36,7 @@ struct SettingsView: View {
             Form {
                 captureSection
                 speechSection
+                contextSection
                 digestSection
                 notifySection
                 privacySection
@@ -75,6 +81,34 @@ struct SettingsView: View {
         }
     }
 
+    private var contextSection: some View {
+        Section {
+            Toggle("位置（到访的地点）", isOn: Binding(get: { senseLocation }, set: { on in
+                senseLocation = on
+                sensor.enableLocation(on)
+            }))
+            if senseLocation, sensor.locationStatus == .authorizedWhenInUse {
+                Text("现在只有“使用 App 期间”的定位权限，后台记不到你去过哪。到「设置 › 拾言 › 位置」改成「始终」。")
+                    .font(.footnote).foregroundStyle(Ink.vermilion)
+            }
+            if senseLocation, sensor.locationStatus == .denied {
+                Text("定位权限被关闭了，到「设置 › 拾言 › 位置」打开。").font(.footnote).foregroundStyle(Ink.vermilion)
+            }
+            Toggle("身体状态（静止 / 步行 / 乘车）", isOn: Binding(get: { senseMotion }, set: { on in
+                senseMotion = on
+                sensor.enableMotion(on)
+            }))
+            Toggle("读取日程", isOn: Binding(get: { senseCalendar }, set: { on in
+                senseCalendar = on
+                Task { let ok = await sensor.enableCalendar(on); if on && !ok { senseCalendar = false } }
+            }))
+        } header: {
+            Text("情境感知")
+        } footer: {
+            Text("用来判断每段对话发生时你在哪、在干什么（开会、在路上、在家），分章和整理会准很多。位置用的是系统的“到访”检测，很省电；身体状态来自 iPhone 的运动协处理器。这些数据只存在本机；只有开启云端智能体时，地点名称、状态和日程标题（不含坐标）会随转写一起发给它。")
+        }
+    }
+
     private var digestSection: some View {
         Section {
             TextField("关于我：名字、角色，如：汯毅，供应链 AI 负责人", text: $aboutMe, axis: .vertical)
@@ -82,13 +116,13 @@ struct SettingsView: View {
             Picker("总结方式", selection: $engine) {
                 Text("规则提取（本机）").tag("rules")
                 Text("端侧模型（本机）").tag("device")
-                Text("云端模型").tag("cloud")
+                Text("云端智能体").tag("cloud")
             }
             if engine == "device" {
                 LabeledContent("端侧模型", value: DigestEngine.deviceModelAvailable() ? "可用" : "当前不可用")
             }
             if engine == "cloud" {
-                Toggle("启用云端总结", isOn: $cloudEnabled)
+                Toggle("启用云端智能体", isOn: $cloudEnabled)
                 Button("填入 DeepSeek 预设") {
                     cloudURL = "https://api.deepseek.com"
                     cloudModel = "deepseek-chat"
@@ -110,7 +144,7 @@ struct SettingsView: View {
     private var digestFooter: String {
         switch engine {
         case "device": return "使用系统自带的端侧大模型，转写文字不离开设备。需要系统支持并已启用 Apple 智能。"
-        case "cloud": return "启用后，生成回顾时会把当天的转写文字（不含音频）发送到你填写的服务地址，由该服务方按其条款处理和保留；本 App 不经过任何其他服务器。密钥只保存在本机钥匙串。关闭开关即停止上传。"
+        case "cloud": return "云端智能体会先查看当时的情境（地点、状态、日程）、今天前面的经过和以前的记录，推理出你在什么场景，再分章整理；整理结果会经过校验，不合格会退回让它重写。启用后，转写文字（不含音频）和情境文字会发送到你填写的服务地址（推荐 DeepSeek），由该服务方按其条款处理；本 App 不经过任何其他服务器。密钥只保存在本机钥匙串。"
         default: return "只用关键词规则在本机挑出像决定、待办的原句，不会生成任何原话之外的内容；可能漏掉或多挑，需要你过目。"
         }
     }
@@ -166,6 +200,7 @@ struct SettingsView: View {
         .confirmationDialog("删除全部录音、转写和回顾？此操作无法撤销。", isPresented: $confirmDeleteAll, titleVisibility: .visible) {
             Button("全部删除", role: .destructive) {
                 store.deleteAll()
+                sensor.deleteAll()
                 exportURL = nil
             }
             Button("取消", role: .cancel) {}

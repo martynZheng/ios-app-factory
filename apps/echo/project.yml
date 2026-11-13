@@ -43,6 +43,10 @@ targets:
         NSCalendarsWriteOnlyAccessUsageDescription: 在你逐条确认后，把带日期的待办写入日历。
         NSFaceIDUsageDescription: 用面容 ID 保护你的对话记录。
         UIAppFonts: [InkSerif.otf]
+        NSLocationWhenInUseUsageDescription: 记录你到访过的地点，用来判断每段对话发生在哪里（会议室、路上、家里）。只存在本机。
+        NSLocationAlwaysAndWhenInUseUsageDescription: 在后台用系统的到访检测记录你去过的地点（很省电），这样不打开 App 也能知道每段录音发生在哪。只存在本机。
+        NSMotionUsageDescription: 读取 iPhone 记录的运动状态（静止、步行、乘车），用来判断你录音时在做什么。只存在本机。
+        NSCalendarsFullAccessUsageDescription: 读取日程标题和地点，帮助判断每段录音是在哪个会议或活动里；写入待办也需要此权限。
     settings:
       base:
         PRODUCT_NAME: ${APP_NAME}

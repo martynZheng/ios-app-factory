@@ -2,6 +2,23 @@ import Foundation
 
 /// 演示数据（-demo 1）。走真实的解析与合并流程，用于 CI 里在模拟器上截图自测界面。
 enum Demo {
+    private static func at(_ h: Int, _ m: Int) -> Date {
+        Calendar.current.date(bySettingHour: h, minute: m, second: 0, of: Date()) ?? Date()
+    }
+
+    /// 演示用的情境：开车到园区 → 走进会场 → 坐着主持。
+    static func spans() -> [ContextSpan] {
+        [
+            ContextSpan(start: at(8, 52), end: at(9, 18), activity: .driving, place: "文一西路"),
+            ContextSpan(start: at(9, 18), end: at(9, 27), activity: .walking, place: "云栖小镇"),
+            ContextSpan(start: at(9, 27), end: at(12, 0), activity: .still, place: "云栖国际会展中心"),
+        ]
+    }
+
+    static func events() -> [(Date, Date, String, String?)] {
+        [(at(9, 30), at(12, 0), "采供&IDC AI 实战挑战赛 · 决赛", "会展中心 B 厅")]
+    }
+
     static func seed() {
         let store = Store.shared
         let cal = Calendar.current

@@ -12,6 +12,7 @@ struct DayFlowView: View {
 
     /// 首次出现时已有的章数：这些依次入场；之后新增的立即出现。
     @State private var initialCount: Int
+    @State private var mountedAt = Date()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(chapters: [Chapter], items: [DigestItem], live: Bool, namespace: Namespace.ID, onTap: @escaping (Chapter) -> Void) {
@@ -29,18 +30,19 @@ struct DayFlowView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(chapters.enumerated()), id: \.element.id) { index, chapter in
+        LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(chapters.sorted { $0.start < $1.start }.enumerated()), id: \.element.id) { index, chapter in
                 ChapterRow(chapter: chapter,
                            points: items.filter { $0.kind == .point && $0.chapterID == chapter.id },
                            followUps: items.filter { $0.kind != .point && $0.chapterID == chapter.id }.count,
-                           delay: delay(index))
+                           delay: delay(index),
+                           animate: { index >= initialCount || Date().timeIntervalSince(mountedAt) < 1.5 })
                     .modifier(ZoomSource(id: chapter.id, namespace: namespace))
                     .contentShape(Rectangle())
                     .onTapGesture { onTap(chapter) }
                     .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: 14)), removal: .opacity))
             }
-            EndRow(live: live, end: chapters.last?.end)
+            EndRow(live: live, end: chapters.map { $0.end }.max())
                 .id("flow-end")
         }
         .animation(reduceMotion ? nil : .spring(response: 0.55, dampingFraction: 0.88), value: chapters.count)
@@ -65,6 +67,8 @@ private struct ChapterRow: View {
     let points: [DigestItem]
     let followUps: Int
     let delay: Double
+    /// 滚动回来时不再重播入场动画，避免一卡一卡的
+    let animate: () -> Bool
     @State private var shown = false
 
     private var seed: CGFloat { CGFloat(abs(chapter.id.hashValue % 97)) / 9 }
@@ -82,16 +86,27 @@ private struct ChapterRow: View {
             .frame(width: Flow.timeColumn, alignment: .leading)
             .padding(.top, 4)
 
-            rail
-                .frame(width: Flow.rail)
+            Color.clear
+                .frame(width: Flow.rail, height: 1)
 
             content
                 .padding(.bottom, 36)
                 .opacity(shown ? 1 : 0)
                 .offset(y: shown ? 0 : 8)
         }
+        .background(alignment: .topLeading) {
+            rail
+                .frame(width: Flow.rail)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(.leading, Flow.timeColumn)
+        }
         .onAppear {
-            withAnimation(.spring(response: 0.6, dampingFraction: 0.85).delay(delay)) { shown = true }
+            guard !shown else { return }
+            if animate() {
+                withAnimation(.spring(response: 0.6, dampingFraction: 0.85).delay(delay)) { shown = true }
+            } else {
+                shown = true
+            }
         }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
@@ -100,21 +115,25 @@ private struct ChapterRow: View {
 
     /// 手画的圈 + 往下的墨线。线一笔从圈下画到这一段结束。
     private var rail: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .top) {
-                InkRail(seed: seed)
-                    .trim(from: 0, to: shown ? 1 : 0)
-                    .stroke(Ink.ink.opacity(0.55), style: StrokeStyle(lineWidth: 1, lineCap: .round))
-                    .frame(width: 4, height: max(0, geo.size.height - Flow.dotY - Flow.dot / 2 - 3))
-                    .offset(y: Flow.dotY + Flow.dot / 2 + 3)
-                InkRing(seed: seed)
-                    .trim(from: 0, to: shown ? 1 : 0)
-                    .stroke(Ink.ink, style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
-                    .frame(width: Flow.dot, height: Flow.dot)
-                    .offset(y: Flow.dotY - Flow.dot / 2)
-            }
-            .frame(width: geo.size.width)
+        ZStack(alignment: .top) {
+            InkRail(seed: seed)
+                .trim(from: 0, to: shown ? 1 : 0)
+                .stroke(Ink.ink.opacity(0.55), style: StrokeStyle(lineWidth: 1, lineCap: .round))
+                .frame(width: 4)
+                .frame(maxHeight: .infinity)
+                .padding(.top, Flow.dotY + Flow.dot / 2 + 3)
+            InkRing(seed: seed)
+                .trim(from: 0, to: shown ? 1 : 0)
+                .stroke(Ink.ink, style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
+                .frame(width: Flow.dot, height: Flow.dot)
+                .padding(.top, Flow.dotY - Flow.dot / 2)
         }
+    }
+
+    /// “当时在做什么 · 在哪 · 什么状态”
+    private var whereLine: String? {
+        let parts = [chapter.situation, chapter.setting].compactMap { $0 }.filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private var content: some View {
@@ -124,6 +143,18 @@ private struct ChapterRow: View {
                 .foregroundStyle(Ink.ink)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
+            if let where_ = whereLine {
+                Label {
+                    Text(where_)
+                } icon: {
+                    Image(systemName: "mappin.and.ellipse")
+                }
+                .labelStyle(TightLabel())
+                .font(.caption)
+                .foregroundStyle(Ink.ink3)
+                .lineLimit(1)
+                .padding(.top, 6)
+            }
             if chapter.speaker != nil || followUps > 0 {
                 HStack(spacing: 14) {
                     if let speaker = chapter.speaker { SpeakerTag(name: speaker) }
@@ -211,5 +242,15 @@ private struct EndRow: View {
             withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) { pulse = true }
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// 图标和文字挨得更近的 Label。
+struct TightLabel: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 4) {
+            configuration.icon.imageScale(.small)
+            configuration.title
+        }
     }
 }

@@ -40,7 +40,7 @@ struct DigestItem: Codable, Identifiable {
     var chapterID: UUID? = nil
 }
 
-/// 一章 = 一段连续的话题（一位选手的路演、一个议题、一次闲聊）。鱼骨图上的一根骨头。
+/// 一章 = 一段连续的话题（一位选手的路演、一个议题、一次闲聊）。时间线上的一段。
 struct Chapter: Codable, Identifiable, Equatable {
     var id: UUID
     var title: String
@@ -49,6 +49,10 @@ struct Chapter: Codable, Identifiable, Equatable {
     var start: Date
     var end: Date
     var sourceLineIDs: [UUID]
+    /// 传感器看到的情境（地点 · 状态），如“云栖小镇 · 静止”。不是模型猜的。
+    var setting: String? = nil
+    /// 智能体推断的“你当时在做什么”，如“在会场主持路演”。
+    var situation: String? = nil
 }
 
 struct Digest: Codable {
@@ -81,7 +85,47 @@ final class Store: ObservableObject {
     /// 演示模式（-demo 1）：内存里的示例数据，不读写磁盘。CI 截图自测用。
     static let isDemo = UserDefaults.standard.bool(forKey: "demo")
 
-    @Published private(set) var db = DB()
+    @Published private(set) var db = DB() {
+        didSet { index = nil }
+    }
+
+    /// 查询索引：db 一变就作废，下次用到时重建。避免每次刷新界面都全表扫描、逐句格式化日期。
+    private final class Index {
+        var linesByDay: [String: [Line]] = [:]
+        var segmentsByDay: [String: [Segment]] = [:]
+        var lineByID: [UUID: Line] = [:]
+        var segmentByID: [String: Segment] = [:]
+        var allLines: [Line] = []
+    }
+    private var index: Index?
+
+    private var idx: Index {
+        if let index { return index }
+        let i = Index()
+        let cal = Calendar.current
+        var keyCache: [Date: String] = [:]
+        func key(_ date: Date) -> String {
+            let d = cal.startOfDay(for: date)
+            if let k = keyCache[d] { return k }
+            let k = Store.dayKey(d)
+            keyCache[d] = k
+            return k
+        }
+        i.allLines = db.lines.sorted { $0.time < $1.time }
+        for line in i.allLines {
+            i.linesByDay[key(line.time), default: []].append(line)
+            i.lineByID[line.id] = line
+        }
+        for seg in db.segments {
+            i.segmentsByDay[key(seg.start), default: []].append(seg)
+            i.segmentByID[seg.id] = seg
+        }
+        index = i
+        return i
+    }
+
+    /// 全部转写，按时间排序。
+    var sortedLines: [Line] { idx.allLines }
     let audioDir: URL
     private let dbURL: URL
     private var saveScheduled = false
@@ -124,16 +168,15 @@ final class Store: ObservableObject {
     // MARK: 查询
 
     func audioURL(_ segmentID: String) -> URL { audioDir.appendingPathComponent(segmentID + ".m4a") }
-    func segment(_ id: String) -> Segment? { db.segments.first { $0.id == id } }
-    func line(_ id: UUID) -> Line? { db.lines.first { $0.id == id } }
+    func segment(_ id: String) -> Segment? { idx.segmentByID[id] }
+    func line(_ id: UUID) -> Line? { idx.lineByID[id] }
 
-    func lines(on day: String) -> [Line] {
-        db.lines.filter { Store.dayKey($0.time) == day }.sorted { $0.time < $1.time }
-    }
+    func lines(on day: String) -> [Line] { idx.linesByDay[day] ?? [] }
 
-    func segments(on day: String) -> [Segment] {
-        db.segments.filter { Store.dayKey($0.start) == day }
-    }
+    func segments(on day: String) -> [Segment] { idx.segmentsByDay[day] ?? [] }
+
+    /// 有记录的日子，新的在前。
+    var days: [String] { idx.linesByDay.keys.sorted(by: >) }
 
     var storageBytes: Int64 {
         let files = (try? FileManager.default.contentsOfDirectory(at: audioDir, includingPropertiesForKeys: [.fileSizeKey])) ?? []

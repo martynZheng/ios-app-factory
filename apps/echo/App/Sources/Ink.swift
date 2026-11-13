@@ -206,6 +206,8 @@ enum SVGPath {
 /// 正在记录时，人手腕上的表闪一个朱红的点。
 struct StudyVignette: View {
     var live: Bool
+    /// 滚出屏幕时暂停动画，省电也让滚动更顺
+    var visible = true
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -214,7 +216,7 @@ struct StudyVignette: View {
     private static let start = Date()
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 15, paused: reduceMotion || !visible)) { context in
             Canvas { ctx, size in
                 draw(&ctx, size: size, t: context.date.timeIntervalSince(Self.start))
             }
