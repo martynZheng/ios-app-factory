@@ -4,6 +4,7 @@ import SwiftUI
 struct AbilitiesView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var connectors = Connectors.shared
+    @AppStorage("deepseekHarness") private var harness = true
     @State private var adding = false
     @State private var name = ""
     @State private var url = ""
@@ -52,11 +53,17 @@ struct AbilitiesView: View {
                     }
                     LabeledContent("智能体内核", value: Brain.usingPi ? "Pi（原版，\(PiRuntime.shared.version)）" : "内置循环（Pi 未加载）")
                         .font(.footnote)
+                    if Cloud.isDeepSeek {
+                        Toggle("联网用 DeepSeek 的深度搜索", isOn: $harness)
+                            .font(.footnote)
+                    }
                 } header: {
                     Text("自带的能力")
                 } footer: {
                     if !(Cloud.ready && Cloud.isDeepSeek) {
                         Text("搜索、文件解析、语音需要接上 DeepSeek：在对话页粘贴密钥即可。")
+                    } else {
+                        Text("循环和本机工具由 Pi 负责；联网搜索、打开网页交给 DeepSeek 服务端自己多步完成（和 DeepSeek App 的深度思考搜索是同一套），通常更快更准。关掉后改用我们自己逐次调用搜索接口。")
                     }
                 }
                 Section {

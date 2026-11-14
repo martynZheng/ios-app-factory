@@ -22,6 +22,8 @@ sandbox.__pi_event = (runId, json) => {
 };
 sandbox.__pi_cancel = (id) => controllers.get(id)?.abort();
 sandbox.__pi_chat = (id, body) => {
+	if (process.env.DUMPFILE && !globalThis.__dumped) { globalThis.__dumped = true; fs.writeFileSync(process.env.DUMPFILE, body); }
+	if (process.env.DUMP) { const b = JSON.parse(body); console.log("BODY", JSON.stringify({ thinking: b.thinking, effort: b.reasoning_effort, tool_choice: b.tool_choice, temperature: b.temperature, tools: b.tools.map((t) => t.type + ":" + (t.function?.name ?? "")), messages: b.messages.map((m) => ({ ...m, content: typeof m.content === "string" ? m.content.slice(0, 40) : m.content })) }).slice(0, 1500)); }
 	const c = new AbortController();
 	controllers.set(id, c);
 	(async () => {
@@ -64,15 +66,17 @@ vm.runInContext(code, sandbox);
 console.log("loaded", vm.runInContext("Pi.version", sandbox), "globals:", Object.keys(sandbox).join(","));
 const str = { type: "string" };
 sandbox.Pi.start("r1", JSON.stringify({
-	system: "你是一个助理。回答简短。回答完在同一轮最后调用 suggest_replies 给两个后续选项。",
+	system: "你是一个助理。回答简短。回答完在同一轮最后调用 suggest_replies 给两个后续选项。" +
+		(process.env.SERVER === "1" ? "\n联网搜索、打开网页是你的内置能力（由系统直接提供，不在函数工具列表里，照常使用即可）。凡是涉及最新消息、发布、价格、事实的问题，必须先搜索再回答；绝不要说自己不能联网或没有搜索工具。" : ""),
 	model: "deepseek-flash",
 	thinking: process.env.THINK === "1",
+	serverTools: process.env.SERVER === "1",
 	tools: [
 		{ name: "get_time", description: "查一个城市现在的时间", parameters: { type: "object", properties: { city: str }, required: ["city"] } },
 		{ name: "suggest_replies", description: "给后续选项", parameters: { type: "object", properties: { options: { type: "array", items: str } }, required: ["options"] } },
 	],
 	history: [{ role: "user", text: "你好" }, { role: "assistant", text: "你好，有什么事？" }],
-	prompt: { text: "上海和东京现在分别几点？" },
+	prompt: { text: process.env.SERVER === "1" ? "联网查一下 DeepSeek 最近发布的应用 API 有哪些能力，一句话说完；再告诉我上海现在几点。" : "上海和东京现在分别几点？" },
 }));
 const end = await ended;
 const texts = log.filter((e) => e.type === "assistant").map((e) => e.text);

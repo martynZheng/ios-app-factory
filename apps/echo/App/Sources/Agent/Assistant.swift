@@ -587,6 +587,8 @@ final class Assistant: ObservableObject {
                         self.absorb(said, final: true)
                     case .toolStart(let name):
                         self.status = self.statusText(name)
+                    case .sources(let list):
+                        sources.append(contentsOf: list)
                     }
                 }
                 outOfTurns = reason == "max_turns"

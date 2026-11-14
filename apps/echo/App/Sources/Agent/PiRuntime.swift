@@ -13,6 +13,8 @@ enum PiEvent {
     /// 一轮结束时模型说的话，以及它要调用几个工具
     case assistant(text: String, toolCalls: Int)
     case toolStart(String)
+    /// DeepSeek 服务端联网时用到的网页
+    case sources([WebSource])
 }
 
 @MainActor
@@ -80,7 +82,7 @@ final class PiRuntime {
 
     /// 跑一次完整的智能体循环。返回停止原因：stop / max_turns。出错抛错，被取消抛 CancellationError。
     /// history 每项是 {role: user|assistant, text, fileIDs?}。
-    func run(system: String, model: String, endpoint: URL, key: String, thinking: Bool?, tools: [AgentTool],
+    func run(system: String, model: String, endpoint: URL, key: String, thinking: Bool?, serverTools: Bool, tools: [AgentTool],
              history: [[String: Any]], prompt: String, images: [Data], fileIDs: [String], maxTurns: Int,
              onEvent: @escaping (PiEvent) -> Void) async throws -> String {
         guard available else { throw DigestError.unavailable("Pi 内核没有加载成功。") }
@@ -96,6 +98,11 @@ final class PiRuntime {
             "prompt": ["text": prompt, "images": images.map { $0.base64EncodedString() }, "fileIDs": fileIDs] as [String: Any],
         ]
         if let thinking { config["thinking"] = thinking }
+        if serverTools {
+            // DeepSeek 的服务端 harness：联网搜索、打开网页由 DeepSeek 自己多步完成（必须开思考，用 effort 控制快慢）
+            config["serverTools"] = true
+            config["effort"] = thinking == true ? "high" : "low"
+        }
         let data = try JSONSerialization.data(withJSONObject: config)
         let json = String(data: data, encoding: .utf8) ?? "{}"
         return try await withTaskCancellationHandler {
@@ -130,6 +137,12 @@ final class PiRuntime {
             run.onEvent(.assistant(text: e["text"] as? String ?? "", toolCalls: e["toolCalls"] as? Int ?? 0))
         case "tool_start":
             run.onEvent(.toolStart(e["name"] as? String ?? ""))
+        case "sources":
+            let items = (e["items"] as? [[String: Any]] ?? []).compactMap { item -> WebSource? in
+                guard let url = item["url"] as? String, !url.isEmpty else { return nil }
+                return WebSource(title: item["title"] as? String ?? url, url: url, site: item["site"] as? String ?? "")
+            }
+            if !items.isEmpty { run.onEvent(.sources(items)) }
         case "end":
             runs[runID] = nil
             run.finish(e["reason"] as? String ?? "stop", e["error"] as? String ?? "")
@@ -224,12 +237,20 @@ final class PiRuntime {
 @MainActor
 enum Brain {
     static var usingPi: Bool { PiRuntime.shared.available }
+    /// 用 DeepSeek 服务端的联网 harness（默认开）。
+    static var useHarness: Bool { UserDefaults.standard.object(forKey: "deepseekHarness") as? Bool ?? true }
 
     static func run(system: String, tools: [AgentTool], thinking: Bool?, history: [AgentMessage] = [], prompt: String,
                     images: [Data] = [], fileIDs: [String] = [], maxTurns: Int,
                     onEvent: @escaping (PiEvent) -> Void = { _ in }) async throws -> String {
         guard Cloud.ready else { throw DigestError.unavailable("还没有配置云端智能体：在对话页粘贴 DeepSeek 密钥，或到设置里填写。") }
         if PiRuntime.shared.available, let endpoint = Cloud.chatURL {
+            // DeepSeek 自己的联网 harness 和我们的工具混用时，模型有时会以为“函数列表里没有搜索”，所以要明说
+            let harness = Cloud.isDeepSeek && useHarness
+            var system = system
+            if harness {
+                system += "\n\n联网搜索、打开网页、页内查找是你的内置能力（由系统直接提供，不在函数工具列表里，照常使用即可），需要最新信息时优先用它。函数工具里的 web_search / web_fetch 只是备用。绝不要说自己不能联网或没有搜索工具。"
+            }
             var past: [[String: Any]] = []
             for message in history {
                 switch message {
@@ -244,7 +265,7 @@ enum Brain {
                 }
             }
             return try await PiRuntime.shared.run(system: system, model: Cloud.modelName, endpoint: endpoint, key: Cloud.key,
-                                                  thinking: Cloud.isDeepSeek ? thinking : nil, tools: tools, history: past,
+                                                  thinking: Cloud.isDeepSeek ? thinking : nil, serverTools: harness, tools: tools, history: past,
                                                   prompt: prompt, images: images, fileIDs: fileIDs, maxTurns: maxTurns, onEvent: onEvent)
         }
         let agent = Agent(systemPrompt: system, tools: tools, model: try Cloud.model(thinking: thinking))

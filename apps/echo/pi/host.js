@@ -98,8 +98,11 @@ function toWire(messages) {
 			if (m.stopReason === "error" || m.stopReason === "aborted") continue;
 			const out = { role: "assistant", content: m.content.filter((b) => b.type === "text").map((b) => b.text).join("") };
 			const thinking = m.content.filter((b) => b.type === "thinking");
-			// DeepSeek 思考模式：带工具的多轮请求必须把思维链原样传回
-			if (thinking.length > 0) out.reasoning_content = thinking.map((b) => b.thinking).join("");
+			// DeepSeek 思考模式：带工具的多轮请求必须把思维链原样传回。
+			// 用了服务端联网工具时，只传最后一步的思考，之前各步的思考在 server_tool_calls 里。
+			if (typeof m.lastReasoning === "string") out.reasoning_content = m.lastReasoning;
+			else if (thinking.length > 0) out.reasoning_content = thinking.map((b) => b.thinking).join("");
+			if (Array.isArray(m.serverToolCalls) && m.serverToolCalls.length > 0) out.server_tool_calls = m.serverToolCalls;
 			const calls = m.content.filter((b) => b.type === "toolCall");
 			if (calls.length > 0) {
 				out.tool_calls = calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: JSON.stringify(c.arguments ?? {}) } }));
@@ -113,7 +116,7 @@ function toWire(messages) {
 }
 
 /** Pi 的 streamFn：把请求交给宿主去发，再把 SSE 片段还原成 Pi 的事件流。 */
-function makeStreamFn(config) {
+function makeStreamFn(config, send) {
 	return (model, context, options) => {
 		const stream = createAssistantMessageEventStream();
 		const output = {
@@ -129,14 +132,25 @@ function makeStreamFn(config) {
 		const requestId = `q${++counter}`;
 		const tools = getCurrentTools(context.messages);
 		const body = { model: model.id, messages: toWire(context.messages), stream: true, temperature: config.temperature ?? 0.2 };
-		if (config.thinking === true || config.thinking === false) body.thinking = { type: config.thinking ? "enabled" : "disabled" };
-		if (tools.length > 0) {
-			body.tools = tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
-			body.tool_choice = "auto";
+		// DeepSeek 的服务端 harness：联网搜索、打开网页、页内查找都由 DeepSeek 自己多步完成，
+		// 和我们的工具混用时必须开思考模式（用 reasoning_effort 控制快慢）。
+		const serverTools = config.serverTools === true;
+		if (serverTools) {
+			body.thinking = { type: "enabled" };
+			body.reasoning_effort = config.effort || "low";
+		} else if (config.thinking === true || config.thinking === false) {
+			body.thinking = { type: config.thinking ? "enabled" : "disabled" };
 		}
+		const declared = tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
+		if (serverTools) declared.unshift({ type: "deepseek_web_search" }, { type: "deepseek_read_url" });
+		if (declared.length > 0) body.tools = declared;
+		if (tools.length > 0 && !serverTools) body.tool_choice = "auto";
 
 		let textIndex = -1;
 		let thinkingIndex = -1;
+		let stepReasoning = "";
+		const found = [];
+		let cited = [];
 		const pending = new Map(); // index → {id, name, args}
 		let finished = false;
 
@@ -176,9 +190,30 @@ function makeStreamFn(config) {
 					output.usage.output = obj.usage.completion_tokens ?? 0;
 					output.usage.totalTokens = obj.usage.total_tokens ?? 0;
 				}
+				const serverEvent = obj.choices?.[0]?.server_tool_event;
+				if (serverEvent) {
+					if (serverEvent.type === "step_reasoning_done") stepReasoning = "";
+					if (serverEvent.type === "call_started") {
+						const kind = serverEvent.call?.action?.type;
+						send({ type: "tool_start", name: kind === "search" ? "web_search" : "web_fetch" });
+					}
+					if (serverEvent.type === "call_completed") {
+						for (const s of serverEvent.call?.sources ?? []) {
+							if (s.url) found.push({ title: s.title || s.url, url: s.url, site: s.site_name || "" });
+						}
+					}
+				}
 				const delta = obj.choices?.[0]?.delta;
 				if (!delta) return;
+				if (Array.isArray(delta.server_tool_calls)) {
+					output.serverToolCalls = delta.server_tool_calls;
+					output.lastReasoning = stepReasoning;
+				}
+				if (Array.isArray(delta.annotations)) {
+					cited = delta.annotations.map((a) => a.url_citation).filter((c) => c && c.url);
+				}
 				if (typeof delta.reasoning_content === "string") {
+					stepReasoning += delta.reasoning_content;
 					if (thinkingIndex < 0) {
 						output.content.push({ type: "thinking", thinking: "" });
 						thinkingIndex = output.content.length - 1;
@@ -240,6 +275,24 @@ function makeStreamFn(config) {
 				}
 				finished = true;
 				requests.delete(requestId);
+				// 来源：优先给正文真正引用到的网页，没有就给搜到的前几条
+				const seen = new Set();
+				const sources = [];
+				for (const c of cited) {
+					if (seen.has(c.url)) continue;
+					seen.add(c.url);
+					const hit = found.find((f) => f.url === c.url);
+					sources.push({ title: hit?.title || c.title || c.url, url: c.url, site: hit?.site || "" });
+				}
+				if (sources.length === 0 && output.content.some((b) => b.type === "text")) {
+					for (const f of found) {
+						if (seen.has(f.url)) continue;
+						seen.add(f.url);
+						sources.push(f);
+						if (sources.length >= 4) break;
+					}
+				}
+				if (sources.length > 0) send({ type: "sources", items: sources.slice(0, 6) });
 				output.stopReason = output.content.some((b) => b.type === "toolCall") ? "toolUse" : "stop";
 				stream.push({ type: "done", reason: output.stopReason, message: output });
 				stream.end();
@@ -306,7 +359,7 @@ function historyMessage(h, model) {
 const Pi = {
 	version: "pi-agent-core 1.5.2",
 
-	/** 开始一次运行。config: {system, model, thinking, temperature, maxTurns, tools, history, prompt:{text, images, fileIDs}} */
+	/** 开始一次运行。config: {system, model, thinking, serverTools, effort, temperature, maxTurns, tools, history, prompt:{text, images, fileIDs}} */
 	start(runId, configJSON) {
 		const config = JSON.parse(configJSON);
 		const send = (event) => g.__pi_event(runId, JSON.stringify(event));
@@ -330,7 +383,7 @@ const Pi = {
 				tools: makeTools(runId, config.tools || []),
 				messages: (config.history || []).map((h) => historyMessage(h, model)),
 			},
-			streamFn: makeStreamFn(config),
+			streamFn: makeStreamFn(config, send),
 			toolExecution: "sequential",
 			identity: null,
 			finishTurn: async () => (turns >= maxTurns ? { action: "end" } : undefined),
