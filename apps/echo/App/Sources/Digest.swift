@@ -119,40 +119,15 @@ enum DigestEngine {
         throw DigestError.unavailable("端侧模型需要 iOS 26 及以上系统。")
     }
 
+    /// 单次整理（不带工具），同样经 Pi 发出。
+    @MainActor
     static func cloudRespond(_ prompt: String) async throws -> String {
-        let d = UserDefaults.standard
-        guard d.bool(forKey: "cloudEnabled") else { throw DigestError.unavailable("云端总结未启用。") }
-        let base = (d.string(forKey: "cloudURL") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let model = (d.string(forKey: "cloudModel") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let key = Keychain.get("cloudKey") ?? ""
-        guard !base.isEmpty, !model.isEmpty, !key.isEmpty,
-              let url = URL(string: base.hasSuffix("/") ? base + "chat/completions" : base + "/chat/completions"),
-              url.scheme == "https" else {
-            throw DigestError.unavailable("请先在设置里填写云端服务的 HTTPS 地址、模型名和密钥。")
+        var last = ""
+        _ = try await Brain.run(system: instructions, tools: [], thinking: false, prompt: prompt, maxTurns: 1, web: false) { event in
+            if case let .assistant(text, _) = event, !text.isEmpty { last = text }
         }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 90
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        let body: [String: Any] = [
-            "model": model,
-            "temperature": 0,
-            "messages": [["role": "system", "content": instructions], ["role": "user", "content": prompt]],
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            throw DigestError.unavailable("云端服务返回错误（HTTP \(code)）。")
-        }
-        guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = obj["choices"] as? [[String: Any]],
-              let message = choices.first?["message"] as? [String: Any],
-              let content = message["content"] as? String else {
-            throw DigestError.unavailable("云端服务返回了无法识别的内容。")
-        }
-        return content
+        guard !last.isEmpty else { throw DigestError.unavailable("云端服务没有返回内容。") }
+        return last
     }
 
     struct ParsedChapter {
@@ -457,8 +432,6 @@ final class DigestCoordinator: ObservableObject {
     }
 
     /// full = 丢弃当天已有回顾，整天重新整理；force = 不等攒够，现在就整理新增内容。
-    static func cloudModel() throws -> ChatModel { try Cloud.model() }
-
     func update(day: String, full: Bool = false, force: Bool = false) {
         let store = Store.shared
         guard !Store.isDemo, !working, !store.lines(on: day).isEmpty else { return }
@@ -502,7 +475,7 @@ final class DigestCoordinator: ObservableObject {
                 do {
                     let block: DigestEngine.Block
                     if engine == "cloud" {
-                        block = try await DigestAgent.run(chunk: chunk, day: day, contextNote: ctx, model: try Self.cloudModel()) { text in
+                        block = try await DigestAgent.run(chunk: chunk, day: day, contextNote: ctx) { text in
                             self.agentStatus = text
                         }
                     } else {

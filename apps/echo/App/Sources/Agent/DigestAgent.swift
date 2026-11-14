@@ -1,6 +1,6 @@
 import Foundation
 
-/// 整理录音的个人智能体：在 Pi 式的循环里，DeepSeek 先用工具弄清楚“我在哪、在干什么、之前发生了什么”，
+/// 整理录音的个人智能体：跑在 Pi 上（Brain.run），DeepSeek 先用工具弄清楚“我在哪、在干什么、之前发生了什么”，
 /// 再按场景分章，最后通过 submit_digest 提交；提交的内容会被校验，不合格就把问题退回给模型重写。
 @MainActor
 enum DigestAgent {
@@ -47,7 +47,7 @@ enum DigestAgent {
     }
 
     /// 跑一次智能体，返回校验过的整理结果。status 用来在界面上显示它正在做什么。
-    static func run(chunk: [Line], day: String, contextNote: String, model: ChatModel,
+    static func run(chunk: [Line], day: String, contextNote: String,
                     status: @escaping (String) -> Void) async throws -> DigestEngine.Block {
         let store = Store.shared
         let sensor = ContextSensor.shared
@@ -132,12 +132,13 @@ enum DigestAgent {
             },
         ]
 
-        let agent = Agent(systemPrompt: system, tools: tools, model: model)
-        agent.maxTurns = 7
-        agent.subscribe { event in
+        var replies: [String] = []
+        let onEvent: (PiEvent) -> Void = { event in
             switch event {
             case .turnStart(let n): status(n == 1 ? "智能体在读这一段…" : "智能体在推理场景…")
-            case .toolExecutionStart(_, let name, _):
+            case .assistant(let text, _):
+                if !text.isEmpty { replies.append(text) }
+            case .toolStart(let name):
                 switch name {
                 case "get_context": status("查看当时的位置、状态和日程…")
                 case "get_day_so_far": status("回看今天前面的经过…")
@@ -152,15 +153,13 @@ enum DigestAgent {
         let rows = chunk.enumerated().map { "[\($0.offset)] \(clock.string(from: $0.element.time)) \($0.element.text)" }.joined(separator: "\n")
         let prompt = (contextNote.isEmpty ? "" : contextNote + "\n\n") +
             "【本段转写】\(clock.string(from: first))–\(clock.string(from: last))，共 \(chunk.count) 行\n" + rows
-        try await agent.prompt(prompt)
+        _ = try await Brain.run(system: system, tools: tools, thinking: nil, prompt: prompt, maxTurns: 7, web: false, onEvent: onEvent)
 
         if let submitted { return submitted }
         // 模型没走提交工具、直接把 JSON 写在回复里：也接受
-        for m in agent.messages.reversed() {
-            if case let .assistant(text, _, _) = m, let text, text.contains("{") {
-                let block = DigestEngine.parseBlock(text, lines: chunk)
-                if !block.chapters.isEmpty || !block.others.isEmpty { return block }
-            }
+        for text in replies.reversed() where text.contains("{") {
+            let block = DigestEngine.parseBlock(text, lines: chunk)
+            if !block.chapters.isEmpty || !block.others.isEmpty { return block }
         }
         throw DigestError.unavailable("智能体没有给出整理结果，稍后会重试。")
     }

@@ -240,13 +240,14 @@ enum Brain {
     /// 用 DeepSeek 服务端的联网 harness（默认开）。
     static var useHarness: Bool { UserDefaults.standard.object(forKey: "deepseekHarness") as? Bool ?? true }
 
+    /// web = false：这次不需要上网（比如整理录音），不开 DeepSeek 的联网 harness。
     static func run(system: String, tools: [AgentTool], thinking: Bool?, history: [AgentMessage] = [], prompt: String,
-                    images: [Data] = [], fileIDs: [String] = [], maxTurns: Int,
+                    images: [Data] = [], fileIDs: [String] = [], maxTurns: Int, web: Bool = true,
                     onEvent: @escaping (PiEvent) -> Void = { _ in }) async throws -> String {
         guard Cloud.ready else { throw DigestError.unavailable("还没有配置云端智能体：在对话页粘贴 DeepSeek 密钥，或到设置里填写。") }
         if PiRuntime.shared.available, let endpoint = Cloud.chatURL {
             // DeepSeek 自己的联网 harness 和我们的工具混用时，模型有时会以为“函数列表里没有搜索”，所以要明说
-            let harness = Cloud.isDeepSeek && useHarness
+            let harness = Cloud.isDeepSeek && useHarness && web
             var system = system
             if harness {
                 system += "\n\n联网搜索、打开网页、页内查找是你的内置能力（由系统直接提供，不在函数工具列表里，照常使用即可），需要最新信息时优先用它。函数工具里的 web_search / web_fetch 只是备用。绝不要说自己不能联网或没有搜索工具。"
