@@ -171,7 +171,7 @@ final class Assistant: ObservableObject {
         let name = BuddyProfile.shared.name
         parts.append("""
         你叫“\(name)”，是住在我 iPhone 和 Apple Watch 里的常驻助理（App 叫“拾言”）。我的手表会把我一天里身边的对话录下来转成文字，手机知道我去过哪、是在走路还是坐车、日程上有什么。
-        你能用工具查这些，也能联网搜索、读网页、看图、读我发的文件，还能用我接入的连接器。凡是涉及“我今天/最近说过什么、答应过什么、在哪、接下来有什么”的问题，先用工具查，不要凭空回答；涉及最新消息、价格、事实的，先联网查。
+        你能用工具查这些，也能联网搜索、读网页、看图、读我发的文件，还能用我接入的连接器。凡是涉及“我今天/最近说过什么、答应过什么、在哪、接下来有什么”的问题，先用工具查，不要凭空回答；涉及最新消息、实时信息、具体数字和你不确定的事实，先调 web_research 联网查（它会自己搜索和核实），不要凭记忆答，也不要说自己不能联网；闲聊和我自己的事不用联网。
         说话像一个靠谱又亲近的朋友在发微信：中文、口语，先给结论。每条消息一两句话，最多三四句；要说的多就分成 2–4 条，条与条之间单独一行写 ---（三个减号），不要一次倒一大段。只有我明确要“详细讲”“写一篇”“列清单”时才写长。不确定就说不确定；不要编造我没说过的话。少用标题和长列表。引用网上的信息时用 Markdown 链接把来源嵌在句子里。
         要查东西时，可以先用一句很短的话告诉我你去查什么（比如“我查一下”），然后在同一轮直接调用工具；说了要做的事（查、画图、记下来）就必须在这次回复里真的调用对应的工具做完，不要只说不做。
         写入提醒事项或日历必须用 propose_reminder / propose_event 提议，由我在界面上点确认，你不能替我确认。
@@ -298,13 +298,30 @@ final class Assistant: ObservableObject {
                 return ToolResult(content: rows.isEmpty ? "这段时间没有日程。" : rows.joined(separator: "\n"))
             },
         ]
-        if Cloud.isDeepSeek {
-            tools.append(AgentTool(name: "web_search", description: "联网搜索最新信息。query 是搜索词（不超过 128 字）。",
+        if Cloud.isDeepSeek && Brain.useHarness {
+            let depth: [String: Any] = ["type": "string", "enum": ["quick", "deep"],
+                                        "description": "quick：天气、新闻、简单事实（约 3 秒）；deep：要核实的数字、最新财报和数据、多方对比、要画图的数据（约 10–30 秒）"]
+            tools.append(AgentTool(name: "web_research", description: """
+                联网查资料：交给一个联网研究员，它会自己搜索、打开网页核实，返回带来源的结论。
+                凡是涉及最新消息、实时信息（天气、价格、行情）、具体数字和事实、你不确定或可能过时的知识，都先用它查，不要凭记忆回答；
+                闲聊、问我自己的记录和日程、你确定知道的常识，不需要用。question 写成完整的问题（带上时间范围和要的数字口径）。
+                """, parameters: obj(["question": str, "depth": depth], ["question"])) { args in
+                let q = (args["question"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !q.isEmpty else { return ToolResult(content: "question 不能为空。", isError: true) }
+                let place = await MainActor.run { sensor.place(at: Date()) }
+                let (text, sources) = try await Cloud.research(q, deep: (args["depth"] as? String) == "deep", place: place)
+                collect(sources)
+                return ToolResult(content: text)
+            })
+        } else if Cloud.isDeepSeek {
+            tools.append(AgentTool(name: "web_search", description: "联网搜索最新信息。query 是搜索词（不超过 128 字）。凡是涉及最新消息、实时信息、你不确定的事实，先搜再答。",
                                    parameters: obj(["query": str], ["query"])) { args in
                 let (text, sources) = try await Cloud.search(args["query"] as? String ?? "", question: question)
                 collect(sources)
                 return ToolResult(content: text)
             })
+        }
+        if Cloud.isDeepSeek {
             tools.append(AgentTool(name: "web_fetch", description: "读取一个网页的正文（Markdown）。",
                                    parameters: obj(["url": str], ["url"])) { args in
                 ToolResult(content: try await Cloud.fetch(args["url"] as? String ?? ""))
@@ -322,6 +339,7 @@ final class Assistant: ObservableObject {
         case "list_todos": return "看待办…"
         case "get_calendar": return "看日程…"
         case "web_search": return "联网搜索…"
+        case "web_research": return "联网查资料…"
         case "web_fetch": return "读网页…"
         case "remember": return "记下来…"
         case "forget": return "更新记忆…"

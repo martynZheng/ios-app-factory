@@ -54,7 +54,7 @@ struct AbilitiesView: View {
                     LabeledContent("智能体内核", value: Brain.usingPi ? "Pi（原版，\(PiRuntime.shared.version)）" : "内置循环（Pi 未加载）")
                         .font(.footnote)
                     if Cloud.isDeepSeek {
-                        Toggle("联网用 DeepSeek 的深度搜索", isOn: $harness)
+                        Toggle("联网研究用 DeepSeek 的搜索智能体", isOn: $harness)
                             .font(.footnote)
                     }
                 } header: {
@@ -63,7 +63,7 @@ struct AbilitiesView: View {
                     if !(Cloud.ready && Cloud.isDeepSeek) {
                         Text("搜索、文件解析、语音需要接上 DeepSeek：在对话页粘贴密钥即可。")
                     } else {
-                        Text("循环和本机工具由 Pi 负责；联网搜索、打开网页交给 DeepSeek 服务端自己多步完成（和 DeepSeek App 的深度思考搜索是同一套），通常更快更准。关掉后改用我们自己逐次调用搜索接口。")
+                        Text("循环和本机工具由 Pi 负责。要不要上网由它自己判断：需要时调用“联网研究”工具，交给 DeepSeek 服务端的搜索智能体多步搜索、打开网页核实（和 DeepSeek App 的深度思考搜索是同一套），简单问题约 3 秒，要核实的数据约 10–30 秒。关掉后改为它自己逐次调用搜索接口。")
                     }
                 }
                 Section {
