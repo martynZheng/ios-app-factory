@@ -176,6 +176,10 @@ struct ChapterSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    PaintedSky(hour: SkyPalette.hour(of: chapter.start), seed: "chapter-\(chapter.id)",
+                               marks: [(0.5, Daylight.rgb(chapter.start))], corner: 20)
+                        .frame(height: 150)
+                        .padding(.bottom, 18)
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(Daylight.span(chapter))
                             .font(Ink.clock(17))
@@ -237,7 +241,7 @@ struct ChapterSheet: View {
                 .padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .background(Ink.paper.ignoresSafeArea())
+            .background(PaperBackground())
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
         }
         .tint(Ink.ink)

@@ -30,9 +30,11 @@ struct DayFlowView: View {
     }
 
     var body: some View {
+        let sorted = chapters.sorted { $0.start < $1.start }
         LazyVStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(chapters.sorted { $0.start < $1.start }.enumerated()), id: \.element.id) { index, chapter in
+            ForEach(Array(sorted.enumerated()), id: \.element.id) { index, chapter in
                 ChapterRow(chapter: chapter,
+                           next: index + 1 < sorted.count ? sorted[index + 1].start : nil,
                            points: items.filter { $0.kind == .point && $0.chapterID == chapter.id },
                            followUps: items.filter { $0.kind != .point && $0.chapterID == chapter.id }.count,
                            delay: delay(index),
@@ -56,14 +58,16 @@ struct DayFlowView: View {
 private enum Flow {
     static let timeColumn: CGFloat = 50
     static let rail: CGFloat = 24
-    static let dot: CGFloat = 10
-    static let dotY: CGFloat = 13      // 圆圈中心，对齐标题第一行
+    static let dot: CGFloat = 14
+    static let dotY: CGFloat = 27      // 色点中心，对齐卡片里标题第一行
 }
 
 // MARK: - 一段
 
 private struct ChapterRow: View {
     let chapter: Chapter
+    /// 下一段开始的时刻：线的颜色从这一段渐变过去
+    let next: Date?
     let points: [DigestItem]
     let followUps: Int
     let delay: Double
@@ -84,13 +88,15 @@ private struct ChapterRow: View {
                     .foregroundStyle(Ink.ink3)
             }
             .frame(width: Flow.timeColumn, alignment: .leading)
-            .padding(.top, 4)
+            .padding(.top, 16)
 
             Color.clear
                 .frame(width: Flow.rail, height: 1)
 
             content
-                .padding(.bottom, 36)
+                .padding(14)
+                .background(wash)
+                .padding(.bottom, 22)
                 .opacity(shown ? 1 : 0)
                 .offset(y: shown ? 0 : 8)
         }
@@ -113,20 +119,36 @@ private struct ChapterRow: View {
         .accessibilityHint("查看这一段")
     }
 
-    /// 手画的圈 + 往下的墨线。线一笔从圈下画到这一段结束。
+    private var tint: RGB { Daylight.rgb(chapter.start) }
+    @Environment(\.colorScheme) private var scheme
+
+    /// 这一段的底：那个时刻的颜色淡淡一抹，左上角浓一点，像粉彩擦过。
+    private var wash: some View {
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        let strong = scheme == .dark ? 0.20 : 0.16
+        return shape
+            .fill(LinearGradient(colors: [tint.color(strong), tint.color(strong * 0.35)], startPoint: .topLeading, endPoint: .bottomTrailing))
+            .overlay(
+                Image(uiImage: PaperGrain.tile)
+                    .resizable(resizingMode: .tile)
+                    .opacity(0.10)
+                    .blendMode(scheme == .dark ? .screen : .multiply)
+                    .clipShape(shape)
+            )
+            .overlay(shape.strokeBorder(tint.color(scheme == .dark ? 0.35 : 0.28), lineWidth: 0.8))
+    }
+
+    /// 蜡笔点 + 往下的一笔蜡笔线，颜色从这一段的时刻过渡到下一段。
     private var rail: some View {
         ZStack(alignment: .top) {
-            InkRail(seed: seed)
-                .trim(from: 0, to: shown ? 1 : 0)
-                .stroke(Ink.ink.opacity(0.55), style: StrokeStyle(lineWidth: 1, lineCap: .round))
-                .frame(width: 4)
+            CrayonRail(from: tint, to: next.map { Daylight.rgb($0) } ?? tint, seed: "rail-\(chapter.id)")
+                .frame(width: 8)
                 .frame(maxHeight: .infinity)
-                .padding(.top, Flow.dotY + Flow.dot / 2 + 3)
-            InkRing(seed: seed)
-                .trim(from: 0, to: shown ? 1 : 0)
-                .stroke(Ink.ink, style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
-                .frame(width: Flow.dot, height: Flow.dot)
+                .padding(.top, Flow.dotY + Flow.dot / 2 + 2)
+                .scaleEffect(x: 1, y: shown ? 1 : 0, anchor: .top)
+            CrayonDot(color: tint, size: Flow.dot, seed: "dot-\(chapter.id)")
                 .padding(.top, Flow.dotY - Flow.dot / 2)
+                .scaleEffect(shown ? 1 : 0.2)
         }
     }
 

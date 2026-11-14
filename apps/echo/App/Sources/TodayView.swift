@@ -92,7 +92,7 @@ struct TodayView: View {
                 }
             }
         }
-        .background(Ink.paper.ignoresSafeArea())
+        .background(PaperBackground())
         .sensoryFeedback(.impact(weight: .light, intensity: 0.7), trigger: chapters.count)
         .onChange(of: day) { _, newDay in coordinator.update(day: newDay) }
         .sheet(item: $source) { SourceSheet(item: $0) }
@@ -148,11 +148,13 @@ struct TodayView: View {
             .font(.subheadline)
             .foregroundStyle(Ink.ink)
             .padding(.leading, -8)
-            StudyVignette(live: isLive, visible: headerVisible)
-                .frame(maxWidth: 560)
+            PaintedSky(hour: heroHour(digest), seed: "day-" + day, marks: heroMarks(digest))
+                .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                .frame(maxWidth: 620)
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, -10)
-                .padding(.vertical, 2)
+                .overlay(alignment: .bottomLeading) { heroCaption(digest) }
+                .shadow(color: Color.black.opacity(0.10), radius: 14, x: 0, y: 6)
+                .padding(.vertical, 6)
             Text(title)
                 .font(Ink.serif(29, relativeTo: .largeTitle))
                 .foregroundStyle(Ink.ink)
@@ -194,6 +196,42 @@ struct TodayView: View {
             }
         }
         .animation(.snappy, value: day)
+    }
+
+    /// 天空画的是哪个时刻：今天就是现在；以前的日子取最后一段的时刻。
+    private func heroHour(_ digest: Digest?) -> CGFloat {
+        if Store.isDemo { return 10.0 }
+        if day == Store.dayKey(Date()) { return SkyPalette.hour(of: Date()) }
+        if let last = digest?.chapters?.map({ $0.end }).max() { return SkyPalette.hour(of: last) }
+        return 18
+    }
+
+    /// 地平线上的光点：每一段按时刻排开（早 6 点到夜 12 点）。
+    private func heroMarks(_ digest: Digest?) -> [(CGFloat, RGB)] {
+        (digest?.chapters ?? []).map { c in
+            let x = (SkyPalette.hour(of: c.start) - 6) / 18
+            return (max(0, min(1, x)), Daylight.rgb(c.start))
+        }
+    }
+
+    /// 画上压一行小字：几段、多长、在哪。
+    private func heroCaption(_ digest: Digest?) -> some View {
+        let chapters = digest?.chapters ?? []
+        let minutes = chapters.reduce(0.0) { $0 + $1.end.timeIntervalSince($1.start) / 60 }
+        var parts: [String] = []
+        if !chapters.isEmpty { parts.append("\(chapters.count) 段") }
+        if minutes >= 1 { parts.append(minutes >= 60 ? String(format: "%.1f 小时", minutes / 60) : "\(Int(minutes)) 分钟") }
+        if let last = sensor.places(from: Store.date(fromDayKey: day), to: Store.date(fromDayKey: day).addingTimeInterval(86_400)).last?.1 { parts.append(last) }
+        return Group {
+            if !parts.isEmpty {
+                Text(parts.joined(separator: " · "))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.35), radius: 3, x: 0, y: 1)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 12)
+            }
+        }
     }
 
     /// 这一天依次去过的地方。
