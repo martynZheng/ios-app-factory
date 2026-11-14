@@ -172,7 +172,8 @@ final class Assistant: ObservableObject {
         parts.append("""
         你叫“\(name)”，是住在我 iPhone 和 Apple Watch 里的常驻助理（App 叫“拾言”）。我的手表会把我一天里身边的对话录下来转成文字，手机知道我去过哪、是在走路还是坐车、日程上有什么。
         你能用工具查这些，也能联网搜索、读网页、看图、读我发的文件，还能用我接入的连接器。凡是涉及“我今天/最近说过什么、答应过什么、在哪、接下来有什么”的问题，先用工具查，不要凭空回答；涉及最新消息、价格、事实的，先联网查。
-        说话像一个靠谱又亲近的朋友：中文、口语、简短，先给结论再给必要的理由；不确定就说不确定；不要编造我没说过的话。少用标题和长列表。引用网上的信息时用 Markdown 链接把来源嵌在句子里。
+        说话像一个靠谱又亲近的朋友在发微信：中文、口语，先给结论。每条消息一两句话，最多三四句；要说的多就分成 2–4 条，条与条之间单独一行写 ---（三个减号），不要一次倒一大段。只有我明确要“详细讲”“写一篇”“列清单”时才写长。不确定就说不确定；不要编造我没说过的话。少用标题和长列表。引用网上的信息时用 Markdown 链接把来源嵌在句子里。
+        要查东西时，可以先用一句很短的话告诉我你去查什么（比如“我查一下”），然后在同一轮直接调用工具；说了要做的事（查、画图、记下来）就必须在这次回复里真的调用对应的工具做完，不要只说不做。
         写入提醒事项或日历必须用 propose_reminder / propose_event 提议，由我在界面上点确认，你不能替我确认。
         持续了解我：对话里出现值得长期记住的关于我的事（偏好、习惯、家人同事是谁、在忙的项目、在意的事、固定安排），不用我开口，直接用 remember 记下来，一条一件事；发现记错了或过时了用 forget 删掉。临时的事不要记。
         我说想看什么资讯、关心什么话题时，用 set_feed_topics 更新我的资讯流（传完整的新列表）。你会按它定时给我推送。
@@ -336,7 +337,85 @@ final class Assistant: ObservableObject {
     // MARK: 对话
 
     func stop() {
+        halted = true
+        queue.removeAll()
         job?.cancel()
+    }
+
+    // MARK: 一条一条地“打”出来
+
+    /// 等着显示的气泡（模型写得比人读得快，这里排队慢慢放）。
+    private var queue: [String] = []
+    /// 这次回复已经落下的气泡
+    private var committed: [UUID] = []
+    private var revealer: Task<Void, Never>?
+    private var halted = false
+    /// 当前这一轮已经排进队列的段数
+    private var queuedInTurn = 0
+    private var turnOpen = false
+
+    /// 模型用单独一行的 --- 把回答分成几条消息。
+    static func segments(_ text: String) -> [String] {
+        var out: [String] = []
+        var current: [String] = []
+        for line in text.replacingOccurrences(of: "\r", with: "").components(separatedBy: "\n") {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t == "---" || t == "***" || t == "———" || t == "——" {
+                out.append(current.joined(separator: "\n"))
+                current = []
+            } else {
+                current.append(line)
+            }
+        }
+        out.append(current.joined(separator: "\n"))
+        return out.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
+
+    /// 流式文字进来：已经写完的段（后面出现了分隔线）先排队；final 时把剩下的也排进去。
+    private func absorb(_ text: String, final: Bool) {
+        var parts = Self.segments(text)
+        if !final { parts = Array(parts.dropLast()) }
+        if parts.count > queuedInTurn {
+            for part in parts[queuedInTurn...] where !part.isEmpty { queue.append(part) }
+            queuedInTurn = parts.count
+            reveal()
+        }
+    }
+
+    private func commit(_ text: String) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        let message = ChatMessage(role: .assistant, text: t)
+        ChatStore.shared.append(message)
+        committed.append(message.id)
+    }
+
+    /// 先停一下（三个点），再像打字一样把一条消息放出来，然后落成气泡。
+    private func reveal() {
+        guard revealer == nil else { return }
+        revealer = Task { @MainActor in
+            while !self.queue.isEmpty {
+                let text = self.queue.removeFirst()
+                self.streaming = ""
+                try? await Task.sleep(nanoseconds: self.committed.isEmpty ? 250_000_000 : 550_000_000)
+                let chars = Array(text)
+                let step = max(1, chars.count / 70)
+                var shown = 0
+                while shown < chars.count && !self.halted {
+                    shown = min(chars.count, shown + step)
+                    self.streaming = String(chars[0..<shown])
+                    try? await Task.sleep(nanoseconds: 22_000_000)
+                }
+                self.streaming = ""
+                self.commit(String(chars[0..<shown]))
+                if self.halted { break }
+            }
+            self.revealer = nil
+        }
+    }
+
+    private func drain() async {
+        while revealer != nil { try? await Task.sleep(nanoseconds: 40_000_000) }
     }
 
     func send(text: String, imageJPEG: Data? = nil, attachment: Attachment? = nil, spoken: Bool = false) {
@@ -353,6 +432,11 @@ final class Assistant: ObservableObject {
         busy = true
         streaming = ""
         status = "在想…"
+        queue = []
+        committed = []
+        halted = false
+        queuedInTurn = 0
+        turnOpen = false
         Speaker.shared.stop()
 
         job = Task { @MainActor in
@@ -360,7 +444,11 @@ final class Assistant: ObservableObject {
             var sources: [WebSource] = []
             var suggestions: [String] = []
             var charts: [ChartSpec] = []
-            var reply = ChatMessage(role: .assistant, text: "")
+            /// 这一轮模型在调用工具之前已经说了话
+            var spokeThisTurn = false
+            var problem: String?
+            var stopped = false
+            var outOfTurns = false
             do {
                 let model = try Cloud.model(thinking: Self.deepThink)
                 let str: [String: Any] = ["type": "string"]
@@ -389,10 +477,10 @@ final class Assistant: ObservableObject {
                     UserDefaults.standard.set(Array(list.prefix(8)), forKey: "feedTopics")
                     return ToolResult(content: list.isEmpty ? "已清空，不再推送资讯。" : "已更新。每天上午和傍晚各看一次，有值得看的才推。")
                 })
-                tools.append(AgentTool(name: "suggest_replies", description: "在回答下面给我 2–3 个可以直接点的后续选项。每个不超过 12 个字，用我的口吻。调用后照常写完你的回答。",
+                tools.append(AgentTool(name: "suggest_replies", description: "在回答下面给我 2–3 个可以直接点的后续选项。每个不超过 12 个字，用我的口吻。先把回答写完，在同一轮的最后调用它。",
                                        parameters: obj(["options": strings], ["options"])) { args in
                     suggestions = (args["options"] as? [String] ?? []).map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(16)) }.filter { !$0.isEmpty }
-                    return ToolResult(content: "好，选项会显示在回答下面。现在直接写回答，不要在正文里重复这些选项。")
+                    return ToolResult(content: "好，选项会显示在回答下面。如果还没写回答，现在直接写，不要在正文里重复这些选项。", terminate: spokeThisTurn)
                 })
                 let numbers: [String: Any] = ["type": "array", "items": ["type": "number"] as [String: Any]]
                 let seriesItem: [String: Any] = obj(["name": str, "type": ["type": "string", "enum": ["line", "area", "bar"]] as [String: Any],
@@ -403,7 +491,7 @@ final class Assistant: ObservableObject {
                     let (spec, problem) = ChartSpec.parse(args)
                     guard let spec else { return ToolResult(content: "没画成：\(problem)", isError: true) }
                     charts.append(spec)
-                    return ToolResult(content: "图已经显示在回答里了。接着用一两句话说图里最值得注意的地方，不要再把数据列一遍。")
+                    return ToolResult(content: "图已经显示在回答里了。接着用一两句话说图里最值得注意的地方，不要再把数据列一遍。", terminate: spokeThisTurn)
                 })
                 tools.append(AgentTool(name: "schedule_notification", description: "在指定时间给我发一条手机通知。time 格式 yyyy-MM-dd HH:mm，必须是将来。",
                                        parameters: obj(["time": str, "title": str, "body": str], ["time", "title"])) { args in
@@ -458,11 +546,12 @@ final class Assistant: ObservableObject {
                     system += "\n\n我这句话是用语音说的（语音识别可能有错别字，按意思理解），你的回答会被朗读出来：像说话一样，两三句讲完，不用 Markdown、列表和链接。"
                 }
                 let agent = Agent(systemPrompt: system, tools: tools, model: model)
-                agent.maxTurns = 10
+                agent.maxTurns = 14
                 let recent = Date().addingTimeInterval(-20 * 86_400)
-                agent.seed(history.filter { !$0.failed }.map { m -> AgentMessage in
+                let turns: [AgentMessage] = history.filter { !$0.failed }.map { m -> AgentMessage in
                     var t = m.text
                     if m.image != nil { t += "\n［当时附了一张图片］" }
+                    for chart in m.charts ?? [] { t += "\n［这里显示了一张图：\(chart.title)］" }
                     if m.role == .user {
                         if let id = m.fileID, m.time > recent, Cloud.isDeepSeek {
                             return AgentMessage.userWithFiles(t.isEmpty ? "看看这个文件。" : t, [], [id])
@@ -471,47 +560,82 @@ final class Assistant: ObservableObject {
                         return AgentMessage.user(t.isEmpty ? "（空）" : t)
                     }
                     return AgentMessage.assistant(text: t, toolCalls: [], reasoning: nil)
-                })
+                }
+                // 它的一次回复可能是好几条气泡：合成一条再交给模型，避免连续两条 assistant 消息
+                var merged: [AgentMessage] = []
+                for turn in turns {
+                    if case let .assistant(text, _, _) = turn, case let .assistant(previous, _, _)? = merged.last {
+                        merged[merged.count - 1] = .assistant(text: (previous ?? "") + "\n---\n" + (text ?? ""), toolCalls: [], reasoning: nil)
+                    } else {
+                        merged.append(turn)
+                    }
+                }
+                agent.seed(merged)
                 agent.onPartial = { text in
-                    self.streaming = text
+                    guard self.turnOpen else { return }
                     self.status = nil
+                    self.absorb(text, final: false)
                 }
                 agent.subscribe { event in
                     switch event {
+                    case .turnStart:
+                        self.turnOpen = true
+                        self.queuedInTurn = 0
+                        spokeThisTurn = false
+                    case .messageEnd(let message):
+                        if case let .assistant(text, _, _) = message {
+                            self.turnOpen = false
+                            let said = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                            spokeThisTurn = !said.isEmpty
+                            self.absorb(said, final: true)
+                        }
                     case .toolExecutionStart(_, let name, _):
                         self.status = self.statusText(name)
-                    case .turnStart(let n):
-                        if n > 1 {
-                            self.streaming = ""
-                            self.status = "在整理回答…"
-                        }
                     default: break
                     }
                 }
-                try await agent.prompt(prompt, images: imageJPEG.map { [$0] } ?? [], fileIDs: fileIDs)
-                reply.text = agent.lastText ?? (!charts.isEmpty ? "图画好了。" : proposals.isEmpty ? "我没想出该怎么回答，换个说法再问我一次。" : "准备好了，点下面确认。")
+                let reason = try await agent.prompt(prompt, images: imageJPEG.map { [$0] } ?? [], fileIDs: fileIDs)
+                outOfTurns = reason == "max_turns"
             } catch {
-                let partial = self.streaming.trimmingCharacters(in: .whitespacesAndNewlines)
                 if Task.isCancelled || (error as? URLError)?.code == .cancelled || error is CancellationError {
-                    reply.text = partial.isEmpty ? "（已停下）" : partial
-                    reply.stopped = true
+                    stopped = true
                 } else {
-                    reply.text = error.localizedDescription
-                    reply.failed = true
+                    problem = error.localizedDescription
                 }
             }
-            reply.proposals = proposals
-            if !charts.isEmpty { reply.charts = Array(charts.suffix(3)) }
-            if !suggestions.isEmpty && !reply.failed { reply.suggestions = Array(suggestions.prefix(3)) }
-            var seen = Set<String>()
-            reply.sources = sources.filter { reply.text.contains($0.url) == false && seen.insert($0.url).inserted }.prefix(4).map { $0 }
+            // 等排队的气泡都放完，再把图、确认卡片、来源、快捷选项挂到最后一条上
+            await self.drain()
+            if outOfTurns { self.commit("这件事要查的步骤太多，我先停在这儿。你说一声“继续”，我接着查。") }
+            if self.committed.isEmpty && problem == nil {
+                if stopped {
+                    self.commit("（已停下）")
+                } else {
+                    self.commit(!charts.isEmpty ? "图画好了。" : (proposals.isEmpty ? "我没想出该怎么回答，换个说法再问我一次。" : "准备好了，点下面确认。"))
+                }
+            }
+            let said = self.committed.compactMap { id in chat.messages.first(where: { $0.id == id })?.text }.joined(separator: "\n")
+            if let last = self.committed.last {
+                var seen = Set<String>()
+                let extra = sources.filter { !said.contains($0.url) && seen.insert($0.url).inserted }.prefix(4).map { $0 }
+                chat.update(last) { m in
+                    m.proposals = proposals
+                    if !charts.isEmpty { m.charts = Array(charts.suffix(3)) }
+                    if !suggestions.isEmpty && problem == nil && !stopped { m.suggestions = Array(suggestions.prefix(3)) }
+                    m.sources = extra
+                    if stopped { m.stopped = true }
+                }
+            }
+            if let problem {
+                var failure = ChatMessage(role: .assistant, text: problem)
+                failure.failed = true
+                chat.append(failure)
+            }
             self.streaming = ""
-            chat.append(reply)
             self.busy = false
             self.status = nil
             self.job = nil
-            if spoken, Self.speakReplies, !reply.failed, reply.stopped != true {
-                Speaker.shared.speak(reply.text, id: reply.id)
+            if spoken, Self.speakReplies, problem == nil, !stopped, !said.isEmpty {
+                Speaker.shared.speak(said, id: self.committed.last)
             }
         }
     }

@@ -137,7 +137,7 @@ struct ChatView: View {
     private var caption: String? {
         if voice.phase == .recording { return "在听…" }
         if voice.phase == .transcribing { return "听写中…" }
-        if assistant.busy { return assistant.status }
+        if assistant.busy { return assistant.status ?? "正在输入…" }
         if speaker.loading { return "清清嗓子…" }
         return nil
     }

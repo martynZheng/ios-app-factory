@@ -28,13 +28,18 @@ struct ChartSpec: Codable, Hashable {
         guard labels.count <= 400 else { return (nil, "点太多了，横轴最多 400 个点，先按周或按月取样。") }
         var list: [ChartSeries] = []
         for raw in (args["series"] as? [[String: Any]] ?? []).prefix(4) {
-            let numbers = (raw["values"] as? [Any] ?? []).map { item -> Double? in
+            var numbers = (raw["values"] as? [Any] ?? []).map { item -> Double? in
                 if let n = item as? NSNumber { return n.doubleValue.isFinite ? n.doubleValue : nil }
                 if let s = item as? String { return Double(s) }
                 return nil
             }
-            guard numbers.count == labels.count else {
-                return (nil, "「\(raw["name"] as? String ?? "?")」有 \(numbers.count) 个值，但横轴有 \(labels.count) 个标签，两者必须一样多（缺的填 null）。")
+            // 个数对不上时尽量画：多的截掉，少的补空；差太多才退回去让它重给
+            if numbers.count != labels.count {
+                guard numbers.count * 2 >= labels.count else {
+                    return (nil, "「\(raw["name"] as? String ?? "?")」只有 \(numbers.count) 个值，但横轴有 \(labels.count) 个标签，两者必须一样多。")
+                }
+                if numbers.count > labels.count { numbers = Array(numbers.prefix(labels.count)) }
+                while numbers.count < labels.count { numbers.append(nil) }
             }
             guard numbers.compactMap({ $0 }).count >= 2 else { continue }
             let kind = (raw["type"] as? String ?? "line").lowercased()
@@ -110,7 +115,8 @@ struct ChartCard: View {
         let n = spec.labels.count
         let want = 4
         if n <= want { return Array(0..<n) }
-        return (0..<want).map { Int((Double($0) * Double(n - 1) / Double(want - 1)).rounded()) }
+        // 最右端的标签会被裁掉，所以最后一个刻度往里收一点
+        return (0..<want).map { Int((Double($0) * Double(n - 1) * 0.86 / Double(want - 1)).rounded()) }
     }
 
     private var yTicks: [Double] {
