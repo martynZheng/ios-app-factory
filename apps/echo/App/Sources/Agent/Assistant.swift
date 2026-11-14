@@ -546,7 +546,8 @@ final class Assistant: ObservableObject {
                     system += "\n\n我这句话是用语音说的（语音识别可能有错别字，按意思理解），你的回答会被朗读出来：像说话一样，两三句讲完，不用 Markdown、列表和链接。"
                 }
                 let agent = Agent(systemPrompt: system, tools: tools, model: model)
-                agent.maxTurns = 14
+                // 对话里不限制步数：它该查多少步就查多少步，你随时可以点停止。200 只是防止程序出错时无限空转。
+                agent.maxTurns = 200
                 let recent = Date().addingTimeInterval(-20 * 86_400)
                 let turns: [AgentMessage] = history.filter { !$0.failed }.map { m -> AgentMessage in
                     var t = m.text
@@ -605,7 +606,7 @@ final class Assistant: ObservableObject {
             }
             // 等排队的气泡都放完，再把图、确认卡片、来源、快捷选项挂到最后一条上
             await self.drain()
-            if outOfTurns { self.commit("这件事要查的步骤太多，我先停在这儿。你说一声“继续”，我接着查。") }
+            if outOfTurns { self.commit("我已经连续做了两百步还没做完，多半是哪里绕住了，先停在这儿。你说一声“继续”，我接着做。") }
             if self.committed.isEmpty && problem == nil {
                 if stopped {
                     self.commit("（已停下）")
