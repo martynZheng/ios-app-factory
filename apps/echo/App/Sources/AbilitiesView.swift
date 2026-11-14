@@ -6,6 +6,8 @@ struct AbilitiesView: View {
     @ObservedObject private var connectors = Connectors.shared
     @AppStorage("deepseekHarness") private var harness = true
     @State private var adding = false
+    @AppStorage("myShortcuts") private var shortcuts = ""
+    @State private var grantStatus: String?
     @State private var name = ""
     @State private var url = ""
     @State private var token = ""
@@ -67,6 +69,7 @@ struct AbilitiesView: View {
                         Text("循环和本机工具由 Pi 负责。要不要上网由它自己判断：需要时调用“联网研究”工具，交给 DeepSeek 服务端的搜索智能体多步搜索、打开网页核实（和 DeepSeek App 的深度思考搜索是同一套），简单问题约 3 秒，要核实的数据约 10–30 秒。关掉后改为它自己逐次调用搜索接口。")
                     }
                 }
+                phoneSection
                 Section {
                     ForEach(connectors.list) { c in
                         VStack(alignment: .leading, spacing: 4) {
@@ -93,6 +96,53 @@ struct AbilitiesView: View {
             .sheet(isPresented: $adding) { addSheet }
         }
         .tint(Ink.ink)
+    }
+
+    private var phoneSection: some View {
+        Section {
+            grantRow("heart", "健康", "步数、睡眠、心率、体能训练（只读）") {
+                await PhoneApps.shared.healthAccess() ?? "已请求。在“健康”里可随时改：设置 › 健康 › 数据访问与设备 › 拾言。"
+            }
+            grantRow("calendar", "日历", "查看、新建、修改；删除要你确认") {
+                await PhoneApps.shared.calendarAccess() ? "日历已授权。" : "没授权。到系统设置 › 拾言 › 日历，选“完全访问”。"
+            }
+            grantRow("checklist", "提醒事项", "查看、新建、勾掉；删除要你确认") {
+                await PhoneApps.shared.remindersAccess() ? "提醒事项已授权。" : "没授权。到系统设置 › 拾言 › 提醒事项，选“完全访问”。"
+            }
+            grantRow("person.crop.circle", "通讯录", "按名字查电话、邮箱、生日（只读）") {
+                await PhoneApps.shared.contactsAccess() ? "通讯录已授权。" : "没授权。到系统设置 › 拾言 › 通讯录打开。"
+            }
+            if let grantStatus {
+                Text(grantStatus).font(.footnote).foregroundStyle(Ink.ink2)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("我的快捷指令").font(.subheadline)
+                TextField("每行一个：名字 — 用途。如：记一笔账 — 输入金额和用途，记到钱迹", text: $shortcuts, axis: .vertical)
+                    .font(.footnote)
+                    .lineLimit(2...8)
+            }
+            .padding(.vertical, 2)
+        } header: {
+            Text("手机里的应用")
+        } footer: {
+            Text("iOS 不允许一个 App 直接读别的 App。官方的健康、日历、提醒事项、通讯录用系统授权接入；其他 App（记账、笔记、智能家居、打车……）通过你的“快捷指令”接入：在快捷指令 App 里做好，把名字写在上面，它就能运行并拿回结果。它还能直接打开链接和 App（导航、打电话、微信……）。备忘录、信息、微信聊天记录这类数据，系统不开放读取。")
+        }
+    }
+
+    private func grantRow(_ symbol: String, _ title: String, _ detail: String, action: @escaping () async -> String) -> some View {
+        Button {
+            Task { grantStatus = await action() }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: symbol).frame(width: 26).foregroundStyle(Ink.ink)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).foregroundStyle(Ink.ink)
+                    Text(detail).font(.footnote).foregroundStyle(Ink.ink3)
+                }
+                Spacer()
+                Text("授权").font(.footnote).foregroundStyle(Ink.ink2)
+            }
+        }
     }
 
     private func status(_ c: Connector) -> String {

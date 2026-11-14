@@ -718,7 +718,7 @@ private struct ProposalCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(proposal.kind == .reminder ? "提醒事项" : "日历", systemImage: proposal.kind == .reminder ? "checklist" : "calendar")
+            Label(kindLabel, systemImage: proposal.kind == .reminder || proposal.kind == .deleteReminder ? "checklist" : "calendar")
                 .labelStyle(TightLabel())
                 .font(.caption)
                 .foregroundStyle(Ink.ink3)
@@ -740,12 +740,12 @@ private struct ProposalCard: View {
             }
             if !proposal.done {
                 Button(action: confirm) {
-                    Text(proposal.kind == .reminder ? "写入提醒事项" : "写入日历")
+                    Text(buttonLabel)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Chat.mineText)
+                        .foregroundStyle(isDelete ? Color.white : Chat.mineText)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 8)
-                        .background(Capsule().fill(Chat.mine))
+                        .background(Capsule().fill(isDelete ? Ink.vermilion : Chat.mine))
                 }
                 .buttonStyle(.plain)
                 .padding(.top, 2)
@@ -754,6 +754,25 @@ private struct ProposalCard: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Chat.field))
+    }
+
+    private var isDelete: Bool { proposal.kind == .deleteEvent || proposal.kind == .deleteReminder }
+
+    private var kindLabel: String {
+        switch proposal.kind {
+        case .reminder: return "提醒事项"
+        case .event: return "日历"
+        case .deleteEvent: return "删除日程"
+        case .deleteReminder: return "删除提醒"
+        }
+    }
+
+    private var buttonLabel: String {
+        switch proposal.kind {
+        case .reminder: return "写入提醒事项"
+        case .event: return "写入日历"
+        case .deleteEvent, .deleteReminder: return "确认删除"
+        }
     }
 }
 

@@ -6,7 +6,7 @@ import UserNotifications
 
 /// 需要你点头才会执行的动作（写提醒事项、写日历）。
 struct Proposal: Codable, Equatable {
-    enum Kind: String, Codable { case reminder, event }
+    enum Kind: String, Codable { case reminder, event, deleteEvent, deleteReminder }
     var kind: Kind
     var title: String
     var notes: String?
@@ -15,6 +15,8 @@ struct Proposal: Codable, Equatable {
     var location: String?
     var done = false
     var result: String?
+    /// 删除时要删的那一项（日历 / 提醒事项里的 id）
+    var targetID: String? = nil
 }
 
 struct ChatMessage: Codable, Identifiable, Equatable {
@@ -153,7 +155,7 @@ final class Assistant: ObservableObject {
         你能用工具查这些，也能联网搜索、读网页、看图、读我发的文件，还能用我接入的连接器。凡是涉及“我今天/最近说过什么、答应过什么、在哪、接下来有什么”的问题，先用工具查，不要凭空回答；涉及最新消息、实时信息、具体数字和你不确定的事实，先调 web_research 联网查（它会自己搜索和核实），不要凭记忆答，也不要说自己不能联网；闲聊和我自己的事不用联网。
         说话像一个靠谱又亲近的朋友在发微信：中文、口语，先给结论。每条消息一两句话，最多三四句；要说的多就分成 2–4 条，条与条之间单独一行写 ---（三个减号），不要一次倒一大段。只有我明确要“详细讲”“写一篇”“列清单”时才写长。不确定就说不确定；不要编造我没说过的话。少用标题和长列表。引用网上的信息时用 Markdown 链接把来源嵌在句子里。
         要查东西时，可以先用一句很短的话告诉我你去查什么（比如“我查一下”），然后在同一轮直接调用工具；说了要做的事（查、画图、记下来）就必须在这次回复里真的调用对应的工具做完，不要只说不做。
-        写入提醒事项或日历必须用 propose_reminder / propose_event 提议，由我在界面上点确认，你不能替我确认。
+        你可以直接操作我手机里的“日历”“提醒事项”（查、新建、修改、勾掉），读“健康”和“通讯录”，打开别的 App 或链接，运行我的快捷指令。新建和修改直接做，做完告诉我结果；删除必须用 delete_item 放确认卡片，由我点确认。
         持续了解我：对话里出现值得长期记住的关于我的事（偏好、习惯、家人同事是谁、在忙的项目、在意的事、固定安排），不用我开口，直接用 remember 记下来，一条一件事；临时的事不要记。发现记忆里有错，用 memory_read 打开那一页、改好后 memory_write 写回。夜里你会“做梦”把笔记核对、整理进维基。
         我说想看什么资讯、关心什么话题时，用 set_feed_topics 更新我的资讯流（传完整的新列表）。你会按它定时给我推送。
         我要图表、走势、对比图时，你能画：先把数据查全（联网搜索、读网页，或用我给的文件和数字），再调用 draw_chart，图会直接显示在回答里。量纲不同的两组数（比如股价和市净率）一组放左轴一组放右轴叠在一起。不要说自己画不了图，也不要让我自己去 Excel 里画。查不到完整数据就说清楚缺哪段、用了多少个点，绝不编数字；股票有拆股的用复权价并在 note 里注明。
@@ -259,24 +261,9 @@ final class Assistant: ObservableObject {
                 }
                 return ToolResult(content: rows.isEmpty ? "没有未完成的待办。" : rows.prefix(40).joined(separator: "\n"))
             },
-            AgentTool(name: "get_calendar", description: "看我的日程（需要我在设置里开启“读取日程”）。时间格式 yyyy-MM-dd HH:mm。",
-                      parameters: obj(["from": str, "to": str], ["from", "to"])) { args in
-                let from = self.parseTime(args["from"]) ?? Date()
-                let to = self.parseTime(args["to"]) ?? from.addingTimeInterval(86_400)
-                guard ContextSensor.calendarOn || Store.isDemo else { return ToolResult(content: "我还没开启“读取日程”（设置 › 情境感知）。") }
-                let events = sensor.calendar(from: from, to: to)
-                let md = DateFormatter()
-                md.dateFormat = "M月d日 HH:mm"
-                var rows: [String] = []
-                for e in events {
-                    var row = "\(md.string(from: e.0))–\(hm.string(from: e.1)) \(e.2)"
-                    if let loc = e.3, !loc.isEmpty { row += "（\(loc)）" }
-                    rows.append(row)
-                }
-                return ToolResult(content: rows.isEmpty ? "这段时间没有日程。" : rows.joined(separator: "\n"))
-            },
         ]
         tools.append(contentsOf: MemoryTools.read())
+        tools.append(contentsOf: PhoneTools.read())
         if Cloud.isDeepSeek && Brain.useHarness {
             let depth: [String: Any] = ["type": "string", "enum": ["quick", "deep"],
                                         "description": "quick：天气、新闻、简单事实（约 3 秒）；deep：要核实的数字、最新财报和数据、多方对比、要画图的数据（约 10–30 秒）"]
@@ -319,7 +306,6 @@ final class Assistant: ObservableObject {
         case "memory_read": return "翻记忆…"
         case "memory_write", "memory_delete": return "更新记忆…"
         case "list_todos": return "看待办…"
-        case "get_calendar": return "看日程…"
         case "web_search": return "联网搜索…"
         case "web_research": return "联网查资料…"
         case "web_fetch": return "读网页…"
@@ -329,7 +315,15 @@ final class Assistant: ObservableObject {
         case "suggest_replies": return "在整理回答…"
         case "draw_chart": return "画图…"
         case "schedule_notification": return "设定提醒…"
-        case "propose_reminder", "propose_event": return "准备写入，等你确认…"
+        case "propose_reminder", "propose_event", "delete_item": return "等你确认…"
+        case "health_data": return "看健康数据…"
+        case "calendar_events": return "看日历…"
+        case "calendar_create", "calendar_update": return "改日历…"
+        case "reminders_list": return "看提醒事项…"
+        case "reminders_create", "reminders_complete": return "改提醒事项…"
+        case "contacts_search": return "查通讯录…"
+        case "run_shortcut": return "运行快捷指令…"
+        case "open_url": return "打开…"
         default: return tool.hasPrefix("c") ? "调用连接器…" : "处理中…"
         }
     }
@@ -484,20 +478,7 @@ final class Assistant: ObservableObject {
                     let ok = await Pusher.schedule(at: when, title: args["title"] as? String ?? "提醒", body: args["body"] as? String ?? "")
                     return ToolResult(content: ok ? "已设定，到时间会提醒。" : "没有通知权限，我需要到系统设置里允许拾言发通知。", isError: !ok)
                 })
-                tools.append(AgentTool(name: "propose_reminder", description: "提议写一条提醒事项，由我点确认后才写入。due 可选，格式 yyyy-MM-dd HH:mm。",
-                                       parameters: obj(["title": str, "due": str, "notes": str], ["title"])) { args in
-                    proposals.append(Proposal(kind: .reminder, title: args["title"] as? String ?? "", notes: args["notes"] as? String,
-                                              start: self.parseTime(args["due"])))
-                    return ToolResult(content: "已放到界面上等我确认。告诉我点一下确认就行，不要说已经写入。")
-                })
-                tools.append(AgentTool(name: "propose_event", description: "提议写一个日历日程，由我点确认后才写入。start/end 格式 yyyy-MM-dd HH:mm。",
-                                       parameters: obj(["title": str, "start": str, "end": str, "location": str, "notes": str], ["title", "start"])) { args in
-                    guard let start = self.parseTime(args["start"]) else { return ToolResult(content: "start 时间格式应为 yyyy-MM-dd HH:mm。", isError: true) }
-                    let end = self.parseTime(args["end"]) ?? start.addingTimeInterval(3600)
-                    proposals.append(Proposal(kind: .event, title: args["title"] as? String ?? "", notes: args["notes"] as? String,
-                                              start: start, end: max(end, start), location: args["location"] as? String))
-                    return ToolResult(content: "已放到界面上等我确认。告诉我点一下确认就行，不要说已经写入。")
-                })
+                tools.append(contentsOf: PhoneTools.act(proposeDelete: { proposals.append($0) }))
                 tools.append(contentsOf: Connectors.shared.agentTools(readOnly: false))
 
                 // 附件：能交给 DeepSeek 解析的（PDF、Word、PPT、表格、电子书）上传后用 file_id 引用；否则用本机读出的文字
@@ -663,6 +644,10 @@ final class Assistant: ObservableObject {
                 e.calendar = calendar
                 try events.save(e, span: .thisEvent, commit: true)
                 return "已写入日历"
+            case .deleteEvent:
+                return PhoneApps.shared.deleteEvent(id: p.targetID ?? "")
+            case .deleteReminder:
+                return PhoneApps.shared.deleteReminder(id: p.targetID ?? "")
             }
         } catch {
             return "写入失败：\(error.localizedDescription)"

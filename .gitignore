@@ -14,3 +14,4 @@ vendor/
 .bundle/
 apps/*/App/Info.plist
 apps/*/Watch/Info.plist
+apps/*/App/App.entitlements

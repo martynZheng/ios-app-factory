@@ -44,8 +44,8 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         LSRequiresIPhoneOS: true
         NSSpeechRecognitionUsageDescription: 拾言在本机把你主动录下的对话转写成文字，用于回顾、摘要和待办。
-        NSRemindersFullAccessUsageDescription: 在你逐条确认后，把待办写入「提醒事项」。
-        NSCalendarsWriteOnlyAccessUsageDescription: 在你逐条确认后，把带日期的待办写入日历。
+        NSRemindersFullAccessUsageDescription: 让助理查看、新建、勾掉你的提醒事项；删除前会先问你。
+        NSCalendarsWriteOnlyAccessUsageDescription: 把待办和你让助理安排的事写入日历。
         NSFaceIDUsageDescription: 用面容 ID 保护你的对话记录。
         UIAppFonts: [InkSerif.otf]
         NSCameraUsageDescription: 拍一张照片发给助理，让它识别上面的文字或内容。
@@ -55,7 +55,19 @@ targets:
         NSLocationWhenInUseUsageDescription: 记录你到访过的地点，用来判断每段对话发生在哪里（会议室、路上、家里）。只存在本机。
         NSLocationAlwaysAndWhenInUseUsageDescription: 在后台用系统的到访检测记录你去过的地点（很省电），这样不打开 App 也能知道每段录音发生在哪。只存在本机。
         NSMotionUsageDescription: 读取 iPhone 记录的运动状态（静止、步行、乘车），用来判断你录音时在做什么。只存在本机。
-        NSCalendarsFullAccessUsageDescription: 读取日程标题和地点，帮助判断每段录音是在哪个会议或活动里；写入待办也需要此权限。
+        NSHealthShareUsageDescription: 让助理读取你的步数、睡眠、心率、体能训练等健康数据，回答你的问题、结合你的状态给建议。数据只在回答你时发给你配置的云端模型，不会写入“健康”。
+        NSHealthUpdateUsageDescription: 拾言不会写入健康数据。
+        NSContactsUsageDescription: 让助理在通讯录里查人：电话、邮箱、生日、公司，只在回答你时把查到的那几条发给云端模型。
+        CFBundleURLTypes:
+          - CFBundleURLName: com.deffisoan.echo.callback
+            CFBundleURLSchemes: [shiyan-echo]
+        LSApplicationQueriesSchemes: [shortcuts, weixin, alipay, iosamap, baidumap, comgooglemaps]
+        NSCalendarsFullAccessUsageDescription: 让助理查看和安排你的日程，并判断每段录音是在哪个会议或活动里；删除日程前会先问你。
+    entitlements:
+      path: App/App.entitlements
+      properties:
+        com.apple.developer.healthkit: true
+        com.apple.developer.healthkit.access: []
     settings:
       base:
         PRODUCT_NAME: ${APP_NAME}

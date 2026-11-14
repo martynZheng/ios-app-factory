@@ -92,7 +92,7 @@ final class Dreaming: ObservableObject {
         5. 重写 MEMORY.md：从所有 wiki 里提炼最重要的事实放在“关于我”“正在进行”，最后是完整的“维基目录”。
         6. 调用 finish_dream 汇报。
 
-        原则：宁缺毋滥，绝不编造原始记录里没有的事；description 要写得让人只看这一句就知道该不该打开；全部用中文。
+        原则：宁缺毋滥，绝不编造原始记录里没有的事；description 要写得让人只看这一句就知道该不该打开；全部用中文，wiki 文件名用简短的中文主题名（如 wiki/家庭.md、wiki/AI实战挑战赛.md、wiki/人物-阿杰.md）。
         """
         let prompt = """
         这次要消化的原始记录（\(days.count) 天）：

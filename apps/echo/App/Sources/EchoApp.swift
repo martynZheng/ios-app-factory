@@ -46,6 +46,7 @@ struct EchoApp: App {
                     .tint(Ink.ink)
                 if appLock && locked { lockScreen }
             }
+            .onOpenURL { url in PhoneApps.shared.handle(url) }
             .onChange(of: scenePhase) { _, phase in
                 switch phase {
                 case .active:
