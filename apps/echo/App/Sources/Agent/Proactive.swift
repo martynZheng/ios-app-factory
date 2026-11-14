@@ -35,6 +35,7 @@ final class Proactive {
                 Proactive.scheduleDream()
                 let work = Task { @MainActor in
                     MemoryFS.shared.syncRaw()
+                    await StoryStore.shared.makeIfDue(notify: true)
                     await Dreaming.shared.dreamIfDue()
                 }
                 task.expirationHandler = { work.cancel() }

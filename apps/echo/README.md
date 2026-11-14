@@ -105,3 +105,9 @@ Sync      outbox 落盘 + transferFile  ──▶  Store        JSON 库 + 音�
 每个文件有 front matter `description`。渐进式披露：顶层 → `memory_list`（只看描述）/`memory_search`（描述命中优先）→ `memory_read` → `raw/`。
 
 做梦（`Agent/Dreaming.swift`）：一天一次，BGProcessingTask（凌晨 2 点后）或白天打开 App 补做，也可手动。一次最多消化 5 天的原始记录，用 Pi 跑，工具只能写 notes/wiki/MEMORY.md。旧版的平面记忆（UserDefaults agentMemory）首次启动时迁到 `notes/早先的记忆.md`。
+
+## 每晚的“这一天的故事”（DayStory.swift）
+
+晚上 9 点后（打开 App 或夜里后台时间）把这一天挑 3–6 个瞬间画成一页小漫画，配上路线图，排除无关内容。
+省 Token：输入只用已经整理好的分章和地名（不重读转写），一次请求、不开思考、用 submit_story 交结构化结果；分章没变就不重画（sourceHash）；
+画面全在本机用粉彩引擎（PanelPainter）和系统地图画，不调图像模型；固定说明在系统提示、每天的数据在最后，命中 DeepSeek 上下文缓存。

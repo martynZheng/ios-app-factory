@@ -57,6 +57,8 @@ struct EchoApp: App {
                     Task {
                         MemoryFS.shared.syncRaw()
                         await Proactive.shared.brief()
+                        // 晚上 9 点后把今天画成一页漫画；昨天没画的补上
+                        await StoryStore.shared.makeIfDue()
                         // 夜里没轮到后台时间，白天打开时补上（一天一次）
                         await Dreaming.shared.dreamIfDue()
                     }

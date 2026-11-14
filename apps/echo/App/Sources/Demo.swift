@@ -82,6 +82,14 @@ enum Demo {
         "pending":[{"text":"场地下周还能不能用，需要跟行政确认","sources":[2]}]}
         """
         Task { @MainActor in
+            StoryStore.shared.seedDemo(DayStory(day: day, title: "主持决赛的上午", line: "开车去云栖，主持六支队伍的决赛，散场前把评分的事揽了下来。",
+                panels: [StoryPanel(time: "08:52", place: "文一西路", scene: "car", caption: "早高峰，车往西开，心里过一遍流程"),
+                         StoryPanel(time: "09:30", place: "会展中心", scene: "meeting", caption: "灯亮了，六支队伍，我先开场"),
+                         StoryPanel(time: "09:36", place: "B 厅", scene: "desk", caption: "小美能自己修告警，台下有人点头"),
+                         StoryPanel(time: "10:01", place: "B 厅", scene: "talk", caption: "中场：评分表我来汇总，周五前")],
+                skipped: ["选手的技术细节", "场馆广播"], sourceHash: "demo", generatedAt: Date()))
+        }
+        Task { @MainActor in
             guard !UserDefaults.standard.bool(forKey: "emptyChat") else { return }
             var q = ChatMessage(role: .user, text: "今天我答应了别人什么？")
             q.time = at(9, 58)

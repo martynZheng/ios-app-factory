@@ -38,6 +38,10 @@ struct TodayView: View {
                         .onAppear { headerVisible = true }
                         .onDisappear { headerVisible = false }
                     if hasLines {
+                        DayStoryCard(day: day)
+                            .padding(.horizontal, 22)
+                            .padding(.top, 30)
+                            .id("story")
                         followUps(digest)
                             .padding(.horizontal, 22)
                         sectionTitle(day == Store.dayKey(Date()) ? "今天的经过" : "这一天的经过")
@@ -84,6 +88,9 @@ struct TodayView: View {
             }
             .onAppear {
                 coordinator.update(day: day)
+                if Store.isDemo, UserDefaults.standard.bool(forKey: "scrollStory") {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { proxy.scrollTo("story", anchor: .top) }
+                }
                 if Store.isDemo, UserDefaults.standard.bool(forKey: "scroll") {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
