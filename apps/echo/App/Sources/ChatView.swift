@@ -42,6 +42,7 @@ struct ChatView: View {
     @State private var showFiles = false
     @State private var showCamera = false
     @State private var showAbilities = false
+    @State private var showMemory = Store.isDemo && UserDefaults.standard.bool(forKey: "memoryView")
     @State private var renaming = false
     @State private var nameDraft = ""
     @State private var keyDraft = ""
@@ -116,6 +117,12 @@ struct ChatView: View {
                 .ignoresSafeArea()
         }
         .sheet(isPresented: $showAbilities) { AbilitiesView() }
+        .sheet(isPresented: $showMemory) {
+            NavigationStack {
+                MemoryView()
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { showMemory = false } } }
+            }
+        }
         .alert("给它起个名字", isPresented: $renaming) {
             TextField("名字", text: $nameDraft)
             Button("好") { profile.rename(nameDraft) }
@@ -322,6 +329,7 @@ struct ChatView: View {
                 Divider()
                 Toggle(isOn: $deepThink) { Label("深度思考（更慢更细）", systemImage: "brain") }
                 Button { showAbilities = true } label: { Label("能力与连接器", systemImage: "square.grid.2x2") }
+                Button { showMemory = true } label: { Label("它的记忆", systemImage: "brain") }
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 19, weight: .regular))

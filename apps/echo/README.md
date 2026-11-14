@@ -92,3 +92,16 @@ Sync      outbox 落盘 + transferFile  ──▶  Store        JSON 库 + 音�
 - **分条回复**：模型用单独一行的 `---` 把回答分成几条；每一轮（包括调用工具前说的话）都落成独立气泡，排队用打字动效放出来（`Assistant.reveal`）。图、确认卡片、来源、快捷选项挂在最后一条上。
 - **智能体内核是原版 Pi**：`@earendil-works/pi-agent-core` 打包成 `App/Resources/pi-agent.jsbundle`（约 175 KB，见 `pi/NOTICE.md`），由系统的 JavaScriptCore 运行；`Agent/PiRuntime.swift` 是宿主（发流式请求、执行原生工具、转发事件），`pi/host.js` 是桥接层。所有调云端模型的地方都走它（`Brain.run`）：对话、主动提醒、资讯流、录音整理（`DigestAgent`，不开联网）、单次整理；只有 Pi 加载失败时才退回 `PiAgent.swift` 里的 Swift 移植版。端侧模型（Foundation Models）和规则提取不经过云端，不走 Pi。
 - **联网是一个工具，由智能体自己决定用不用**：`web_research(question, depth)`（`Cloud.research`）。工具内部发一次独立请求，只声明 `deepseek_web_search` / `deepseek_read_url`，由 DeepSeek 服务端的搜索 harness 自己多步搜索、打开网页核实，返回带来源的结论。quick 关思考约 3 秒；deep 开思考（effort low）约 10–30 秒。必须带 `latest_reminder`（日期、所在地），否则它不知道“今天”是哪天。主循环因此不用被迫开思考。`host.js` 里仍保留在主循环直接混用 harness 的能力（serverTools），目前不用：混用时模型常以为自己不能联网。
+
+## 记忆（v4，参考 Anthropic《The components of agent memory》2026-11）
+
+全部是本机文件 `Application Support/Echo/Memory/`（`Agent/Memory.swift`）：
+- `raw/<日期>.md` 第 0 层原始记录（录音转写、章节待办、聊天原文），由 Store/ChatStore 生成，只读，是核对依据
+- `notes/<日期>.md` 第 1 层笔记：聊天里 `remember` 追加
+- `wiki/<主题>.md` 第 2 层主题页：做梦时整理
+- `MEMORY.md` 第 3 层顶层：每次对话整页注入系统提示，≤150 行（工具会拒绝超过 180 行的写入）
+- `dreams/` 整理日志；`.backup/` 上一次做梦前的备份（可撤销）
+
+每个文件有 front matter `description`。渐进式披露：顶层 → `memory_list`（只看描述）/`memory_search`（描述命中优先）→ `memory_read` → `raw/`。
+
+做梦（`Agent/Dreaming.swift`）：一天一次，BGProcessingTask（凌晨 2 点后）或白天打开 App 补做，也可手动。一次最多消化 5 天的原始记录，用 Pi 跑，工具只能写 notes/wiki/MEMORY.md。旧版的平面记忆（UserDefaults agentMemory）首次启动时迁到 `notes/早先的记忆.md`。

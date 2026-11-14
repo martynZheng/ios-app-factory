@@ -53,7 +53,12 @@ struct EchoApp: App {
                     store.cleanupAudio(olderThanDays: retentionDays)
                     transcriber.kick()
                     coordinator.updateRecent()
-                    Task { await Proactive.shared.brief() }
+                    Task {
+                        MemoryFS.shared.syncRaw()
+                        await Proactive.shared.brief()
+                        // 夜里没轮到后台时间，白天打开时补上（一天一次）
+                        await Dreaming.shared.dreamIfDue()
+                    }
                 case .background:
                     Proactive.scheduleRefresh()
                     if appLock { locked = true }

@@ -208,19 +208,12 @@ struct SettingsView: View {
                         UserDefaults.standard.set(Array(list.prefix(8)), forKey: "feedTopics")
                     }
             }
-            if chat.memory.isEmpty {
-                Text("它还没记住什么。聊着聊着它会自己记下关于你的事，你也可以直接说“记住……”。").font(.footnote).foregroundStyle(.secondary)
-            } else {
-                ForEach(chat.memory, id: \.self) { fact in
-                    Text(fact).font(.subheadline)
-                        .swipeActions { Button("忘掉", role: .destructive) { chat.forget(fact) } }
-                }
-            }
+            NavigationLink { MemoryView() } label: { Label("它的记忆", systemImage: "brain") }
             Button("清空对话记录", role: .destructive) { chat.clear() }
         } header: {
             Text("助理")
         } footer: {
-            Text("资讯流：每天上午和傍晚各一次，它按你关心的话题和对你的了解联网找内容，有值得看的才发到对话里（也可以在对话里直接说“定制我的资讯流”）。它记住的事列在上面，左滑可以让它忘掉。\n主动提醒：整理出新的一段对话、到了新地点，或系统给后台时间时，助理会自己看一眼有没有值得现在告诉你的事，有才发通知（8 点前和 23 点后不打扰，一天最多 6 条）。iOS 不允许 App 一直在后台运行，所以提醒的时机取决于这些事件。需要已配置云端智能体并允许通知。")
+            Text("资讯流：每天上午和傍晚各一次，它按你关心的话题和对你的了解联网找内容，有值得看的才发到对话里（也可以在对话里直接说“定制我的资讯流”）。“它的记忆”里能看到它记住的一切：顶层、维基、笔记、原始记录和每晚的整理日志。\n主动提醒：整理出新的一段对话、到了新地点，或系统给后台时间时，助理会自己看一眼有没有值得现在告诉你的事，有才发通知（8 点前和 23 点后不打扰，一天最多 6 条）。iOS 不允许 App 一直在后台运行，所以提醒的时机取决于这些事件。需要已配置云端智能体并允许通知。")
         }
     }
 
@@ -337,7 +330,7 @@ struct SettingsView: View {
                 store.deleteAll()
                 sensor.deleteAll()
                 chat.clear()
-                chat.forgetAll()
+                MemoryFS.shared.deleteAll()
                 exportURL = nil
             }
             Button("取消", role: .cancel) {}

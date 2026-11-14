@@ -29,6 +29,7 @@ struct AbilitiesView: View {
             Ability(id: "files", symbol: "doc.text", title: "读文件", detail: "PDF（含扫描件）、Word、PPT、表格、电子书", on: deepseek),
             Ability(id: "chart", symbol: "chart.xyaxis.line", title: "画图", detail: "把查到的数据画成折线、面积、柱状图，支持左右双轴", on: cloud),
             Ability(id: "voice", symbol: "mic", title: "听和说", detail: "点麦克风直接说；回答可以读给你听", on: deepseek),
+            Ability(id: "memory2", symbol: "brain", title: "长期记忆", detail: "顶层 → 维基 → 笔记 → 原始记录，按需逐层翻；每晚整理一次", on: true),
             Ability(id: "act", symbol: "checklist", title: "提醒事项、日历、定时通知", detail: "写入前都要你点确认", on: true),
             Ability(id: "push", symbol: "sparkles", title: "主动找你", detail: "到点的事提醒你；按你的话题推送资讯", on: cloud),
         ]

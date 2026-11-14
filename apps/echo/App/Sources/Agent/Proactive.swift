@@ -8,6 +8,8 @@ import BackgroundTasks
 final class Proactive {
     static let shared = Proactive()
     static let taskID = "com.deffisoan.echo.refresh"
+    /// 夜里做梦用的长时后台任务（系统通常在充电、空闲时给）
+    static let dreamTaskID = "com.deffisoan.echo.dream"
     private var running = false
 
     static var enabled: Bool {
@@ -28,11 +30,35 @@ final class Proactive {
                 task.setTaskCompleted(success: true)
             }
         }
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: dreamTaskID, using: nil) { task in
+            Task { @MainActor in
+                Proactive.scheduleDream()
+                let work = Task { @MainActor in
+                    MemoryFS.shared.syncRaw()
+                    await Dreaming.shared.dreamIfDue()
+                }
+                task.expirationHandler = { work.cancel() }
+                await work.value
+                task.setTaskCompleted(success: true)
+            }
+        }
     }
 
     static func scheduleRefresh() {
         let request = BGAppRefreshTaskRequest(identifier: taskID)
         request.earliestBeginDate = Date(timeIntervalSinceNow: 45 * 60)
+        try? BGTaskScheduler.shared.submit(request)
+        scheduleDream()
+    }
+
+    /// 约在夜里 2 点之后，要联网；不要求充电（系统自己会挑空闲的时候）。
+    static func scheduleDream() {
+        let request = BGProcessingTaskRequest(identifier: dreamTaskID)
+        request.requiresNetworkConnectivity = true
+        request.requiresExternalPower = false
+        var next = Calendar.current.date(bySettingHour: 2, minute: 0, second: 0, of: Date()) ?? Date()
+        if next < Date() { next = next.addingTimeInterval(86_400) }
+        request.earliestBeginDate = next
         try? BGTaskScheduler.shared.submit(request)
     }
 
@@ -109,7 +135,8 @@ final class Proactive {
         guard let slot = feedSlot(), d.string(forKey: "feedSlot") != slot else { return }
         let topics = Assistant.feedTopics
         let aboutMe = (d.string(forKey: "aboutMe") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !topics.isEmpty || !ChatStore.shared.memory.isEmpty || !aboutMe.isEmpty else { return }
+        let knowsMe = !MemoryFS.shared.list("wiki").isEmpty || !MemoryFS.shared.list("notes").isEmpty
+        guard !topics.isEmpty || knowsMe || !aboutMe.isEmpty else { return }
         running = true
         defer { running = false }
         d.set(slot, forKey: "feedSlot")

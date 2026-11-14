@@ -58,6 +58,7 @@ shot today
 shot chat -tab 3
 shot chat-welcome -tab 3 -emptyChat 1
 shot chat-chart -tab 3 -chartChat 1
+shot memory -tab 3 -memoryView 1
 shot today-bottom -scroll 1
 shot chapter -chapter 1
 shot timeline -tab 1

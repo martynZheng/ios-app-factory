@@ -55,8 +55,6 @@ struct Attachment {
 final class ChatStore: ObservableObject {
     static let shared = ChatStore()
     @Published private(set) var messages: [ChatMessage] = []
-    /// 你让它记住的事
-    @Published private(set) var memory: [String] = []
     let dir: URL
     private let fileURL: URL
 
@@ -68,7 +66,6 @@ final class ChatStore: ObservableObject {
         if !Store.isDemo, let data = try? Data(contentsOf: fileURL), let saved = try? JSONDecoder().decode([ChatMessage].self, from: data) {
             messages = saved
         }
-        memory = UserDefaults.standard.stringArray(forKey: "agentMemory") ?? []
     }
 
     private func save() {
@@ -105,24 +102,6 @@ final class ChatStore: ObservableObject {
         let name = UUID().uuidString + ".jpg"
         try? data.write(to: dir.appendingPathComponent(name), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         return name
-    }
-
-    func remember(_ fact: String) {
-        let text = fact.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !memory.contains(text) else { return }
-        memory.append(text)
-        if memory.count > 80 { memory.removeFirst(memory.count - 80) }
-        UserDefaults.standard.set(memory, forKey: "agentMemory")
-    }
-
-    func forget(_ fact: String) {
-        memory.removeAll { $0 == fact }
-        UserDefaults.standard.set(memory, forKey: "agentMemory")
-    }
-
-    func forgetAll() {
-        memory = []
-        UserDefaults.standard.removeObject(forKey: "agentMemory")
     }
 
     func seedDemo(_ list: [ChatMessage]) { messages = list }
@@ -175,7 +154,7 @@ final class Assistant: ObservableObject {
         说话像一个靠谱又亲近的朋友在发微信：中文、口语，先给结论。每条消息一两句话，最多三四句；要说的多就分成 2–4 条，条与条之间单独一行写 ---（三个减号），不要一次倒一大段。只有我明确要“详细讲”“写一篇”“列清单”时才写长。不确定就说不确定；不要编造我没说过的话。少用标题和长列表。引用网上的信息时用 Markdown 链接把来源嵌在句子里。
         要查东西时，可以先用一句很短的话告诉我你去查什么（比如“我查一下”），然后在同一轮直接调用工具；说了要做的事（查、画图、记下来）就必须在这次回复里真的调用对应的工具做完，不要只说不做。
         写入提醒事项或日历必须用 propose_reminder / propose_event 提议，由我在界面上点确认，你不能替我确认。
-        持续了解我：对话里出现值得长期记住的关于我的事（偏好、习惯、家人同事是谁、在忙的项目、在意的事、固定安排），不用我开口，直接用 remember 记下来，一条一件事；发现记错了或过时了用 forget 删掉。临时的事不要记。
+        持续了解我：对话里出现值得长期记住的关于我的事（偏好、习惯、家人同事是谁、在忙的项目、在意的事、固定安排），不用我开口，直接用 remember 记下来，一条一件事；临时的事不要记。发现记忆里有错，用 memory_read 打开那一页、改好后 memory_write 写回。夜里你会“做梦”把笔记核对、整理进维基。
         我说想看什么资讯、关心什么话题时，用 set_feed_topics 更新我的资讯流（传完整的新列表）。你会按它定时给我推送。
         我要图表、走势、对比图时，你能画：先把数据查全（联网搜索、读网页，或用我给的文件和数字），再调用 draw_chart，图会直接显示在回答里。量纲不同的两组数（比如股价和市净率）一组放左轴一组放右轴叠在一起。不要说自己画不了图，也不要让我自己去 Excel 里画。查不到完整数据就说清楚缺哪段、用了多少个点，绝不编数字；股票有拆股的用复权价并在 note 里注明。
         回答完如果有很自然的下一步，调用 suggest_replies 给我 2–3 个可以直接点的选项（每个不超过 12 个字，用我的口吻写，比如“帮我写进日历”）。没有就不用。
@@ -183,8 +162,7 @@ final class Assistant: ObservableObject {
         parts.append("现在：\(clock.string(from: now))")
         let me = (d.string(forKey: "aboutMe") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !me.isEmpty { parts.append("关于我：\(me)") }
-        let memory = ChatStore.shared.memory
-        if !memory.isEmpty { parts.append("你记住的关于我的事：\n" + memory.map { "- \($0)" }.joined(separator: "\n")) }
+        parts.append(MemoryTools.prompt())
         let topics = Self.feedTopics
         if !topics.isEmpty { parts.append("我的资讯流话题：" + topics.joined(separator: "、")) }
         if !here.isEmpty { parts.append("最近一小时的情境：\n\(here)") }
@@ -250,7 +228,7 @@ final class Assistant: ObservableObject {
                 let lines = store.sortedLines.filter { $0.time >= from && $0.time <= to }.prefix(80)
                 return ToolResult(content: lines.isEmpty ? "这段时间没有转写。" : lines.map { "\(hm.string(from: $0.time)) \($0.text)" }.joined(separator: "\n"))
             },
-            AgentTool(name: "search_memory", description: "在我所有的录音转写和整理里按关键词查找（人名、项目、地点、事情），返回带日期的原话或章节。",
+            AgentTool(name: "search_transcripts", description: "在我所有的录音转写和整理出的章节里按关键词查找（人名、项目、地点、事情），返回带日期的原话。查整理过的长期记忆用 memory_search。",
                       parameters: obj(["query": str], ["query"])) { args in
                 let q = (args["query"] as? String ?? "").trimmingCharacters(in: .whitespaces)
                 guard q.count >= 2 else { return ToolResult(content: "关键词太短。", isError: true) }
@@ -298,6 +276,7 @@ final class Assistant: ObservableObject {
                 return ToolResult(content: rows.isEmpty ? "这段时间没有日程。" : rows.joined(separator: "\n"))
             },
         ]
+        tools.append(contentsOf: MemoryTools.read())
         if Cloud.isDeepSeek && Brain.useHarness {
             let depth: [String: Any] = ["type": "string", "enum": ["quick", "deep"],
                                         "description": "quick：天气、新闻、简单事实（约 3 秒）；deep：要核实的数字、最新财报和数据、多方对比、要画图的数据（约 10–30 秒）"]
@@ -335,7 +314,10 @@ final class Assistant: ObservableObject {
         case "get_context": return "查看你的位置和状态…"
         case "get_day": return "回看这一天的经过…"
         case "get_transcript": return "翻原话…"
-        case "search_memory": return "在以前的记录里找…"
+        case "search_transcripts": return "在以前的录音里找…"
+        case "memory_search", "memory_list": return "翻记忆…"
+        case "memory_read": return "翻记忆…"
+        case "memory_write", "memory_delete": return "更新记忆…"
         case "list_todos": return "看待办…"
         case "get_calendar": return "看日程…"
         case "web_search": return "联网搜索…"
@@ -473,22 +455,7 @@ final class Assistant: ObservableObject {
                 let strings: [String: Any] = ["type": "array", "items": str]
                 func obj(_ props: [String: Any], _ required: [String]) -> [String: Any] { ["type": "object", "properties": props, "required": required] }
                 var tools = readTools(collect: { sources.append(contentsOf: $0) }, question: trimmed)
-                tools.append(AgentTool(name: "remember", description: "记下一条关于我的长期信息（偏好、习惯、人物关系、在忙的事、固定安排）。不用等我说“记住”，你觉得以后用得上就记。以后每次对话你都能看到。",
-                                       parameters: obj(["fact": str], ["fact"])) { args in
-                    let fact = args["fact"] as? String ?? ""
-                    await MainActor.run { chat.remember(fact) }
-                    return ToolResult(content: "记住了。")
-                })
-                tools.append(AgentTool(name: "forget", description: "删掉一条记错了或过时的记忆。fact 要和记忆里的原文一致。",
-                                       parameters: obj(["fact": str], ["fact"])) { args in
-                    let fact = (args["fact"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    let found = await MainActor.run { () -> Bool in
-                        guard chat.memory.contains(fact) else { return false }
-                        chat.forget(fact)
-                        return true
-                    }
-                    return ToolResult(content: found ? "删掉了。" : "记忆里没有这一条原文。", isError: !found)
-                })
+                tools.append(contentsOf: MemoryTools.write(dreaming: false))
                 tools.append(AgentTool(name: "set_feed_topics", description: "设置我的资讯流话题（完整的新列表，最多 8 个，每个是一个具体的话题或关键词）。传空列表表示不再推送。",
                                        parameters: obj(["topics": strings], ["topics"])) { args in
                     let list = (args["topics"] as? [String] ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
