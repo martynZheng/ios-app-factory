@@ -544,6 +544,13 @@ struct CrayonRail: View {
         Canvas { ctx, s in
             var rng = PastelRNG(text: seed)
             let x = s.width / 2
+            // 先垫一条连续的底色，再撒蜡笔颗粒
+            var base = Path()
+            base.move(to: CGPoint(x: x, y: 0))
+            base.addLine(to: CGPoint(x: x, y: s.height))
+            ctx.stroke(base, with: .linearGradient(Gradient(colors: [from.color(0.55), to.color(0.55)]),
+                                                   startPoint: .zero, endPoint: CGPoint(x: 0, y: s.height)),
+                       style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
             let steps = max(2, Int(s.height / 26))
             for i in 0..<steps {
                 let y0 = s.height * CGFloat(i) / CGFloat(steps)
