@@ -49,6 +49,9 @@ kill -INT $REC 2>/dev/null || true
 # 录屏进程偶尔收不到信号就不退出，最多等 20 秒，然后强杀
 for i in $(seq 1 20); do kill -0 $REC 2>/dev/null || break; sleep 1; done
 kill -9 $REC 2>/dev/null || true
+# 录屏进程被强杀时会留下一个上百 MB 的临时文件（grow.mp4.sb-xxxx），推不上 GitHub，会让整个截图步骤失败
+rm -f "$OUT"/*.sb-* 2>/dev/null || true
+[ -s "$OUT/grow.mp4" ] || rm -f "$OUT/grow.mp4"
 echo "video done"
 
 shot today
@@ -64,4 +67,5 @@ shot today-dark-bottom -scroll 1
 shot timeline-dark -tab 1
 shot chat-dark -tab 3
 shot chat-chart-dark -tab 3 -chartChat 1
+rm -f "$OUT"/*.sb-* 2>/dev/null || true
 ls -la "$OUT"
