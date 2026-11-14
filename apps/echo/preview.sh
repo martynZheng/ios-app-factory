@@ -54,6 +54,7 @@ echo "video done"
 shot today
 shot chat -tab 3
 shot chat-welcome -tab 3 -emptyChat 1
+shot chat-chart -tab 3 -chartChat 1
 shot today-bottom -scroll 1
 shot chapter -chapter 1
 shot timeline -tab 1
@@ -62,4 +63,5 @@ limit 30 xcrun simctl ui "$DEV" appearance dark || true
 shot today-dark-bottom -scroll 1
 shot timeline-dark -tab 1
 shot chat-dark -tab 3
+shot chat-chart-dark -tab 3 -chartChat 1
 ls -la "$OUT"

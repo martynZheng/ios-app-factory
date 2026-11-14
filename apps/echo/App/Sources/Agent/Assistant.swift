@@ -40,6 +40,8 @@ struct ChatMessage: Codable, Identifiable, Equatable {
     var spoken: Bool?
     /// 被你中途停下的回答
     var stopped: Bool?
+    /// 它画的图
+    var charts: [ChartSpec]?
 }
 
 /// 发给助理的文件。text 是本机能直接读出的文字；data 是原文件，交给 DeepSeek 解析。
@@ -174,6 +176,7 @@ final class Assistant: ObservableObject {
         写入提醒事项或日历必须用 propose_reminder / propose_event 提议，由我在界面上点确认，你不能替我确认。
         持续了解我：对话里出现值得长期记住的关于我的事（偏好、习惯、家人同事是谁、在忙的项目、在意的事、固定安排），不用我开口，直接用 remember 记下来，一条一件事；发现记错了或过时了用 forget 删掉。临时的事不要记。
         我说想看什么资讯、关心什么话题时，用 set_feed_topics 更新我的资讯流（传完整的新列表）。你会按它定时给我推送。
+        我要图表、走势、对比图时，你能画：先把数据查全（联网搜索、读网页，或用我给的文件和数字），再调用 draw_chart，图会直接显示在回答里。量纲不同的两组数（比如股价和市净率）一组放左轴一组放右轴叠在一起。不要说自己画不了图，也不要让我自己去 Excel 里画。查不到完整数据就说清楚缺哪段、用了多少个点，绝不编数字；股票有拆股的用复权价并在 note 里注明。
         回答完如果有很自然的下一步，调用 suggest_replies 给我 2–3 个可以直接点的选项（每个不超过 12 个字，用我的口吻写，比如“帮我写进日历”）。没有就不用。
         """)
         parts.append("现在：\(clock.string(from: now))")
@@ -323,6 +326,7 @@ final class Assistant: ObservableObject {
         case "forget": return "更新记忆…"
         case "set_feed_topics": return "调整资讯流…"
         case "suggest_replies": return "在整理回答…"
+        case "draw_chart": return "画图…"
         case "schedule_notification": return "设定提醒…"
         case "propose_reminder", "propose_event": return "准备写入，等你确认…"
         default: return tool.hasPrefix("c") ? "调用连接器…" : "处理中…"
@@ -355,6 +359,7 @@ final class Assistant: ObservableObject {
             var proposals: [Proposal] = []
             var sources: [WebSource] = []
             var suggestions: [String] = []
+            var charts: [ChartSpec] = []
             var reply = ChatMessage(role: .assistant, text: "")
             do {
                 let model = try Cloud.model(thinking: Self.deepThink)
@@ -388,6 +393,17 @@ final class Assistant: ObservableObject {
                                        parameters: obj(["options": strings], ["options"])) { args in
                     suggestions = (args["options"] as? [String] ?? []).map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(16)) }.filter { !$0.isEmpty }
                     return ToolResult(content: "好，选项会显示在回答下面。现在直接写回答，不要在正文里重复这些选项。")
+                })
+                let numbers: [String: Any] = ["type": "array", "items": ["type": "number"] as [String: Any]]
+                let seriesItem: [String: Any] = obj(["name": str, "type": ["type": "string", "enum": ["line", "area", "bar"]] as [String: Any],
+                                                     "axis": ["type": "string", "enum": ["left", "right"]] as [String: Any], "values": numbers], ["name", "values"])
+                let seriesList: [String: Any] = ["type": "array", "items": seriesItem]
+                tools.append(AgentTool(name: "draw_chart", description: "画一张图显示在回答里。x 是横轴标签（日期等，按时间从早到晚，2–400 个）；series 是 1–4 条数据，每条的 values 必须和 x 一样多，type 可选 line/area/bar，axis 为 right 的画在右轴（用于和左轴量纲不同的数据）。left_unit/right_unit 是单位，note 写数据来源和口径。数据必须是你查到或我给的真实数字。",
+                                       parameters: obj(["title": str, "x": strings, "series": seriesList, "left_unit": str, "right_unit": str, "note": str], ["title", "x", "series"])) { args in
+                    let (spec, problem) = ChartSpec.parse(args)
+                    guard let spec else { return ToolResult(content: "没画成：\(problem)", isError: true) }
+                    charts.append(spec)
+                    return ToolResult(content: "图已经显示在回答里了。接着用一两句话说图里最值得注意的地方，不要再把数据列一遍。")
                 })
                 tools.append(AgentTool(name: "schedule_notification", description: "在指定时间给我发一条手机通知。time 格式 yyyy-MM-dd HH:mm，必须是将来。",
                                        parameters: obj(["time": str, "title": str, "body": str], ["time", "title"])) { args in
@@ -473,7 +489,7 @@ final class Assistant: ObservableObject {
                     }
                 }
                 try await agent.prompt(prompt, images: imageJPEG.map { [$0] } ?? [], fileIDs: fileIDs)
-                reply.text = agent.lastText ?? (proposals.isEmpty ? "我没想出该怎么回答，换个说法再问我一次。" : "准备好了，点下面确认。")
+                reply.text = agent.lastText ?? (!charts.isEmpty ? "图画好了。" : proposals.isEmpty ? "我没想出该怎么回答，换个说法再问我一次。" : "准备好了，点下面确认。")
             } catch {
                 let partial = self.streaming.trimmingCharacters(in: .whitespacesAndNewlines)
                 if Task.isCancelled || (error as? URLError)?.code == .cancelled || error is CancellationError {
@@ -485,6 +501,7 @@ final class Assistant: ObservableObject {
                 }
             }
             reply.proposals = proposals
+            if !charts.isEmpty { reply.charts = Array(charts.suffix(3)) }
             if !suggestions.isEmpty && !reply.failed { reply.suggestions = Array(suggestions.prefix(3)) }
             var seen = Set<String>()
             reply.sources = sources.filter { reply.text.contains($0.url) == false && seen.insert($0.url).inserted }.prefix(4).map { $0 }

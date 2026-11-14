@@ -92,6 +92,20 @@ enum Demo {
             p.time = at(10, 1)
             p.proactive = true
             p.suggestions = ["展开讲讲第一条", "调整我的资讯流"]
+            if UserDefaults.standard.bool(forKey: "chartChat") {
+                var cq = ChatMessage(role: .user, text: "把这半年的股价和市净率叠在一张图里")
+                cq.time = at(10, 1)
+                var c = ChatMessage(role: .assistant, text: "叠好了。股价一路走高，市净率在 9 月之后反而回落，说明净资产涨得比股价更快。")
+                c.time = at(10, 2)
+                let price: [Double?] = [118, 124, 131, 127, 139, 146, 152, 149, 161, 168, 175, 171]
+                let pb: [Double?] = [48.2, 49.5, 51.0, 49.1, 52.4, 53.0, 51.2, 48.8, 47.5, 46.9, 46.1, 44.8]
+                c.charts = [ChartSpec(title: "股价与市净率（演示数据）", labels: (0..<12).map { "\(5 + $0 / 2)月\($0 % 2 == 0 ? "上" : "下")" },
+                                      series: [ChartSeries(name: "股价", kind: "area", right: false, values: price),
+                                               ChartSeries(name: "市净率", kind: "line", right: true, values: pb)],
+                                      leftUnit: "美元", rightUnit: "倍", note: "演示用的假数据，仅用于检查界面。")]
+                ChatStore.shared.seedDemo([cq, c])
+                return
+            }
             ChatStore.shared.seedDemo([q, a1, p])
         }
         let coordinator = DigestCoordinator.shared

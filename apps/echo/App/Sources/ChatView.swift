@@ -630,6 +630,9 @@ private struct MessageRow: View {
             if message.stopped == true {
                 Text("已停下").font(.footnote).foregroundStyle(Ink.ink3)
             }
+            ForEach(Array((message.charts ?? []).enumerated()), id: \.offset) { _, chart in
+                ChartCard(spec: chart)
+            }
             ForEach(Array(message.proposals.enumerated()), id: \.offset) { index, proposal in
                 ProposalCard(proposal: proposal) { Assistant.shared.confirm(message: message.id, index: index) }
             }
