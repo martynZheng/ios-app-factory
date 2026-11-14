@@ -67,10 +67,10 @@ struct SkyPalette {
     private static let keys: [(CGFloat, SkyPalette)] = [
         (0.0, p(0x0E1035, 0x1F1C55, 0x3A2C72, 0x6A4A9C, 0x4E4A8E, 0x272358, 0xDCD6FF, 0x2C2766, 0x1D1A4C, 0x110F33, 0xFFF4C8)),
         (5.0, p(0x2A2A6E, 0x5A4A93, 0xC97FA5, 0xFFC2A0, 0xF4B6C2, 0x6E5A9E, 0xFFE3B8, 0x7A6BA6, 0x5A4E8A, 0x3A3368, 0xFFFFFF)),
-        (8.0, p(0x4F8FD6, 0x8EC3EC, 0xD7E9F2, 0xFFE6C4, 0xFFFFFF, 0xA9B5E0, 0xFFF1CF, 0x8FA7D6, 0x6D84BF, 0x4E5F9A, 0xFFFFFF)),
-        (12.5, p(0x2F7FD8, 0x5FB2EE, 0xA6DDF6, 0xE6F7FB, 0xFFFFFF, 0x9DB6E6, 0xFFFBEA, 0x86A9DA, 0x5E86C4, 0x3E5F9C, 0xFFFFFF)),
-        (17.0, p(0x4A5BB3, 0xB06FB6, 0xFF8FA0, 0xFFC27A, 0xFFD3B0, 0x9A5E9E, 0xFFD58A, 0x9C5C9C, 0x6E3F86, 0x3F2766, 0xFFF1C2)),
-        (19.5, p(0x1E2366, 0x4B347F, 0xA14C8E, 0xF0797A, 0xC982A8, 0x4A3478, 0xFFB38A, 0x5A3C83, 0x3A2A6B, 0x1E1747, 0xFFE6B0)),
+        (8.0, p(0x3E7FD0, 0x8FC0F0, 0xF2D6E4, 0xFFD9B0, 0xFFFFFF, 0xB0A6E0, 0xFFF0C8, 0x9C9AD8, 0x7476BE, 0x4C4E96, 0xFFFFFF)),
+        (12.5, p(0x1F6FD6, 0x4FAAF0, 0x9ED8F8, 0xE8F8FF, 0xFFFFFF, 0x98B0EC, 0xFFFBEA, 0x7EA2E0, 0x557CC8, 0x34569E, 0xFFFFFF)),
+        (17.0, p(0x3F4FB0, 0xA066C0, 0xFF7FA6, 0xFFB870, 0xFFD6B8, 0x8E5AA8, 0xFFD58A, 0x9A5AA0, 0x6A3C88, 0x3C2468, 0xFFF1C2)),
+        (19.5, p(0x1C2066, 0x48327F, 0xA44A90, 0xF2747A, 0xCC80AA, 0x4A3478, 0xFFB08A, 0x5A3C83, 0x3A2A6B, 0x1E1747, 0xFFE6B0)),
         (24.0, p(0x0E1035, 0x1F1C55, 0x3A2C72, 0x6A4A9C, 0x4E4A8E, 0x272358, 0xDCD6FF, 0x2C2766, 0x1D1A4C, 0x110F33, 0xFFF4C8)),
     ]
 
@@ -161,6 +161,20 @@ enum Brush {
         ctx.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: width, lineCap: .round))
     }
 
+    /// 彩铅的质感：一片区域里很多短短的斜线（3–9pt），像铅笔在纸上来回蹭。
+    static func shortHatch(_ ctx: inout GraphicsContext, in rect: CGRect, angle: CGFloat, density: CGFloat, length: CGFloat,
+                           color: Color, width: CGFloat, rng: inout PastelRNG) {
+        var path = Path()
+        let count = Int(rect.width * rect.height * density)
+        for _ in 0..<count {
+            let x = rng.range(rect.minX, rect.maxX), y = rng.range(rect.minY, rect.maxY)
+            let l = rng.range(length * 0.5, length * 1.3), a = angle + rng.range(-0.12, 0.12)
+            path.move(to: CGPoint(x: x, y: y))
+            path.addLine(to: CGPoint(x: x + cos(a) * l, y: y + sin(a) * l))
+        }
+        ctx.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: width, lineCap: .round))
+    }
+
     /// 纸纹：深浅两种细小颗粒。
     static func grain(_ ctx: inout GraphicsContext, size: CGSize, density: CGFloat, light: Color, dark: Color, rng: inout PastelRNG) {
         var lightPath = Path(), darkPath = Path()
@@ -191,114 +205,158 @@ enum Brush {
 
 /// 画一块“那个时刻的光”。marks 是 0...1 的横向位置（比如当天每一段发生的时刻），会在地平线上留一颗小光点。
 enum SkyPainter {
+    private static func circle(_ c: CGPoint, _ r: CGFloat) -> Path {
+        Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2))
+    }
+
+    private static func glow(_ ctx: inout GraphicsContext, _ c: CGPoint, _ r: CGFloat, _ color: RGB, _ stops: [(CGFloat, Double)]) {
+        let g = Gradient(stops: stops.map { Gradient.Stop(color: color.color($0.1), location: $0.0) })
+        ctx.fill(circle(c, r), with: .radialGradient(g, center: c, startRadius: 0, endRadius: r))
+    }
+
     static func paint(_ ctx: inout GraphicsContext, size: CGSize, hour: CGFloat, seed: String, marks: [(CGFloat, RGB)], dark: Bool) {
         var rng = PastelRNG(text: seed)
         var pal = SkyPalette.at(hour: hour)
         if dark { pal = pal.dimmed() }
         let w = size.width, h = size.height
-        let horizonY = h * rng.range(0.66, 0.74)
+        let hy = h * rng.range(0.64, 0.70)
+        let night = hour < 5 || hour > 19.5
 
-        // 1. 赛璐璐分层的天空：上下几条色带，交界是手抹的波浪边
-        let bands = 7
-        for i in 0..<bands {
-            let t0 = CGFloat(i) / CGFloat(bands)
-            let t1 = CGFloat(i + 1) / CGFloat(bands)
-            let color: RGB
-            if t0 < 0.35 { color = pal.zenith.mix(pal.upper, t0 / 0.35) }
-            else if t0 < 0.7 { color = pal.upper.mix(pal.lower, (t0 - 0.35) / 0.35) }
-            else { color = pal.lower.mix(pal.horizon, (t0 - 0.7) / 0.3) }
-            let top = horizonY * t0 - (i == 0 ? 2 : 0)
-            let bottom = i == bands - 1 ? h : horizonY * t1 + 3
+        // 1. 平滑的底
+        let sky = Gradient(stops: [Gradient.Stop(color: pal.zenith.color, location: 0), Gradient.Stop(color: pal.upper.color, location: 0.45),
+                                   Gradient.Stop(color: pal.lower.color, location: 0.8), Gradient.Stop(color: pal.horizon.color, location: 1)])
+        ctx.fill(Path(CGRect(x: 0, y: 0, width: w, height: h)), with: .linearGradient(sky, startPoint: .zero, endPoint: CGPoint(x: 0, y: hy)))
+
+        // 2. 赛璐璐的几层：越往下越亮越暖，边缘是抹出来的波浪
+        for i in 0..<4 {
+            let top = hy * (0.18 + 0.2 * CGFloat(i)) + rng.range(-4, 4)
+            let col = pal.upper.mix(pal.horizon, 0.25 + 0.22 * CGFloat(i))
+            let ph = rng.range(0, 6.28), amp = rng.range(2, 6), fr = rng.range(1.5, 3.5)
             var band = Path()
-            band.move(to: CGPoint(x: -4, y: bottom))
-            let phase = rng.range(0, 6.28), amp = rng.range(1.5, 4.5)
+            band.move(to: CGPoint(x: -4, y: h))
             var x: CGFloat = -4
-            band.addLine(to: CGPoint(x: -4, y: top))
             while x <= w + 4 {
-                band.addLine(to: CGPoint(x: x, y: top + sin(x / w * 5.5 + phase) * amp + rng.range(-0.6, 0.6)))
-                x += 6
+                band.addLine(to: CGPoint(x: x, y: top + sin(x / w * fr * .pi + ph) * amp))
+                x += 5
             }
-            band.addLine(to: CGPoint(x: w + 4, y: bottom))
+            band.addLine(to: CGPoint(x: w + 4, y: h))
             band.closeSubpath()
-            ctx.fill(band, with: .color(color.color))
+            ctx.fill(band, with: .color(col.color(0.28)))
         }
 
-        // 2. 光：太阳 / 月亮按时刻在天上划一道弧
+        // 3. 光
         let arc = max(0, min(1, (hour - 5) / 15))
-        let sunX = w * (0.12 + 0.76 * arc)
-        let sunY = horizonY - sin(arc * .pi) * horizonY * 0.62 - h * 0.06
-        let glowR = h * 0.55
-        ctx.fill(Path(ellipseIn: CGRect(x: sunX - glowR, y: sunY - glowR, width: glowR * 2, height: glowR * 2)),
-                 with: .radialGradient(Gradient(colors: [pal.glow.color(0.55), pal.glow.color(0.18), pal.glow.color(0)]),
-                                       center: CGPoint(x: sunX, y: sunY), startRadius: 0, endRadius: glowR))
-        let night = hour < 5 || hour > 19.5
-        let discR = h * (night ? 0.06 : 0.075)
-        ctx.fill(Path(ellipseIn: CGRect(x: sunX - discR, y: sunY - discR, width: discR * 2, height: discR * 2)), with: .color(pal.glow.color(0.95)))
+        var sun = CGPoint(x: w * (0.14 + 0.72 * arc), y: hy - sin(arc * .pi) * hy * 0.6 - h * 0.05)
+        if night { sun = CGPoint(x: w * rng.range(0.65, 0.85), y: h * rng.range(0.16, 0.26)) }
+        if !night {
+            // 光柱
+            for _ in 0..<7 {
+                let an = CGFloat.pi * 0.5 + rng.range(-1.1, 1.1), spread = rng.range(0.03, 0.08), len = h * 1.8
+                var beam = Path()
+                beam.move(to: sun)
+                beam.addLine(to: CGPoint(x: sun.x + cos(an - spread) * len, y: sun.y + sin(an - spread) * len))
+                beam.addLine(to: CGPoint(x: sun.x + cos(an + spread) * len, y: sun.y + sin(an + spread) * len))
+                beam.closeSubpath()
+                let g = Gradient(colors: [pal.glow.color(Double(rng.range(0.10, 0.2))), pal.glow.color(0)])
+                ctx.fill(beam, with: .radialGradient(g, center: sun, startRadius: 0, endRadius: len))
+            }
+        }
+        glow(&ctx, sun, h * 0.75, pal.glow, [(0, 0.55), (0.25, 0.25), (1, 0)])
+        let dr = h * (night ? 0.055 : 0.07)
         if night {
-            // 月牙：用天空的颜色咬掉一块
-            let off = discR * 0.45
-            ctx.fill(Path(ellipseIn: CGRect(x: sunX - discR + off, y: sunY - discR - off * 0.4, width: discR * 2, height: discR * 2)),
-                     with: .color(pal.upper.color(0.92)))
-            // 星
-            for _ in 0..<26 {
-                let p = CGPoint(x: rng.range(0, w), y: rng.range(0, horizonY * 0.7))
-                Brush.sparkle(&ctx, at: p, size: rng.range(0.8, 2.4), color: pal.spark.color(Double(rng.range(0.4, 0.9))))
+            glow(&ctx, sun, dr * 2.2, pal.glow, [(0, 0.5), (1, 0)])
+            // 月牙：把月亮挖掉一块
+            ctx.drawLayer { layer in
+                var mask = Path(CGRect(x: -w, y: -h, width: w * 3, height: h * 3))
+                mask.addPath(circle(CGPoint(x: sun.x + dr * 0.5, y: sun.y - dr * 0.25), dr * 0.92))
+                layer.clip(to: mask, style: FillStyle(eoFill: true))
+                layer.fill(circle(sun, dr), with: .color(pal.glow.color))
+            }
+            for _ in 0..<40 {
+                Brush.sparkle(&ctx, at: CGPoint(x: rng.range(0, w), y: rng.range(0, hy * 0.75)), size: rng.range(0.6, 2.4),
+                              color: pal.spark.color(Double(rng.range(0.35, 0.9))))
             }
         } else {
-            // 镜头光晕：沿着光往画面中心的方向几个淡圈
-            let cx = w / 2, cy = h / 2
-            for k in 1...3 {
-                let t = CGFloat(k) * 0.32
-                let fx = sunX + (cx - sunX) * t * 1.6, fy = sunY + (cy - sunY) * t * 1.6
-                let r = h * rng.range(0.03, 0.08)
-                ctx.stroke(Path(ellipseIn: CGRect(x: fx - r, y: fy - r, width: r * 2, height: r * 2)),
-                           with: .color(pal.glow.color(0.25)), lineWidth: rng.range(0.8, 2))
-            }
-        }
-
-        // 3. 云：几团积云，背光面偏紫、受光面偏暖，边缘是粉彩的颗粒
-        let clouds = night ? 2 : Int(rng.range(3, 5.99))
-        for _ in 0..<clouds {
-            let cx = rng.range(-0.05, 1.05) * w
-            let cy = rng.range(0.16, 0.58) * horizonY
-            let scale = rng.range(0.55, 1.15) * h * 0.22
-            var blobs: [CGRect] = []
-            let n = Int(rng.range(6, 10.99))
-            for j in 0..<n {
-                let bx = cx + (CGFloat(j) - CGFloat(n) / 2) * scale * rng.range(0.45, 0.7)
-                let r = scale * rng.range(0.45, 1.0) * (1 - abs(CGFloat(j) - CGFloat(n) / 2) / CGFloat(n))
-                let by = cy - r * rng.range(0.2, 0.8)
-                blobs.append(CGRect(x: bx - r, y: by - r, width: r * 2, height: r * 2))
-            }
-            var shade = Path(), body = Path(), lit = Path()
-            for b in blobs {
-                shade.addEllipse(in: b.offsetBy(dx: scale * 0.06, dy: scale * 0.12))
-                body.addEllipse(in: b)
-                lit.addEllipse(in: b.insetBy(dx: b.width * 0.18, dy: b.height * 0.18).offsetBy(dx: -(sunX < cx ? 1 : -1) * b.width * 0.08, dy: -b.height * 0.1))
-            }
+            glow(&ctx, sun, dr * 2.6, RGB(0xFFFFFF), [(0, 0.9), (0.35, 0.5), (1, 0)])
+            ctx.fill(circle(sun, dr), with: .color(RGB(0xFFFFF8).color))
+            // 横向的一道光带
             ctx.drawLayer { layer in
-                layer.clip(to: Path(CGRect(x: -w, y: -h, width: w * 3, height: cy + h + scale * 0.2)))
-                layer.fill(shade, with: .color(pal.cloudShade.color(0.85)))
-                layer.fill(body, with: .color(pal.cloud.mix(pal.cloudShade, 0.35).color(0.95)))
-                layer.fill(lit, with: .color(pal.cloud.color(0.9)))
+                layer.translateBy(x: sun.x, y: sun.y)
+                layer.scaleBy(x: w * 0.55, y: dr * 0.22)
+                let g = Gradient(colors: [Color.white.opacity(0.75), pal.glow.color(0)])
+                layer.fill(circle(.zero, 1), with: .radialGradient(g, center: .zero, startRadius: 0, endRadius: 1))
             }
-            // 受光边：粉彩颗粒
-            for b in blobs.prefix(6) {
-                let start = rng.range(3.4, 4.2), end = start + rng.range(1.0, 1.8)
-                var pts: [CGPoint] = []
-                var a = start
-                while a <= end {
-                    pts.append(CGPoint(x: b.midX + cos(a) * b.width / 2 * 0.96, y: b.midY + sin(a) * b.height / 2 * 0.96))
-                    a += 0.18
-                }
-                Brush.pastel(&ctx, points: pts, color: pal.cloud.mix(pal.glow, 0.4).color(0.75), width: max(2, scale * 0.07), rng: &rng)
+            // 镜头光晕
+            let center = CGPoint(x: w / 2, y: h / 2)
+            let flares: [(CGFloat, CGFloat, Double, RGB)] = [(0.45, h * 0.035, 0.35, pal.glow), (0.8, h * 0.06, 0.22, pal.horizon),
+                                                              (1.25, h * 0.02, 0.45, RGB(0xB3E6FF)), (1.6, h * 0.09, 0.15, pal.lower)]
+            for (t, r, a, col) in flares {
+                let f = CGPoint(x: sun.x + (center.x - sun.x) * t * 1.4, y: sun.y + (center.y - sun.y) * t * 1.4)
+                glow(&ctx, f, r, col, [(0, a * 0.4), (0.8, a), (1, 0)])
             }
         }
 
-        // 4. 远处起伏的剪影：三层，越近越深，边缘用蜡笔再描一遍
-        let layers: [(RGB, CGFloat, CGFloat)] = [(pal.far, 0.0, 0.08), (pal.mid, 0.06, 0.12), (pal.near, 0.15, 0.16)]
+        // 4. 云：赛璐璐两色 + 一道边缘高光；底部是波浪状的裁切
+        let clouds = night ? 1 : Int(rng.range(2, 4.99))
+        for ci in 0..<clouds {
+            let cx = w * (CGFloat(ci) + rng.range(0.25, 0.75)) / CGFloat(max(clouds, 1))
+            let cy = rng.range(0.28, 0.58) * hy
+            let sc = rng.range(0.6, 1.0) * h * 0.16
+            let n = Int(rng.range(4, 6.99))
+            var blobs: [(CGFloat, CGFloat, CGFloat)] = []
+            for j in 0..<n {
+                let t = (CGFloat(j) - CGFloat(n - 1) / 2) / (CGFloat(n - 1) / 2)
+                let r = sc * (1.0 - 0.55 * t * t) * rng.range(0.8, 1.1)
+                let bx = cx + t * sc * CGFloat(n) * 0.36 + rng.range(-0.1, 0.1) * sc
+                let by = cy - r * rng.range(0.55, 0.95)
+                blobs.append((bx, by, r))
+            }
+            let lx: CGFloat = sun.x < cx ? -1 : 1
+            func body(_ dx: CGFloat, _ dy: CGFloat, _ k: CGFloat) -> Path {
+                var p = Path()
+                for (bx, by, r) in blobs { p.addPath(circle(CGPoint(x: bx + dx * r, y: by + dy * r), r * k)) }
+                return p
+            }
+            var bottom = Path()
+            let span = sc * CGFloat(n)
+            bottom.move(to: CGPoint(x: cx - span, y: cy - sc * 3))
+            bottom.addLine(to: CGPoint(x: cx + span, y: cy - sc * 3))
+            var x = cx + span
+            while x >= cx - span {
+                bottom.addLine(to: CGPoint(x: x, y: cy + sin(x * 0.08) * sc * 0.05))
+                x -= 6
+            }
+            bottom.closeSubpath()
+            let shape = body(0, 0, 1)
+            let hatchSeed = rng.next()
+            ctx.drawLayer { layer in
+                layer.clip(to: bottom)
+                layer.fill(shape, with: .color(pal.cloudShade.color(0.96)))
+                layer.clip(to: shape)
+                layer.fill(body(-lx * 0.14, -0.34, 1), with: .color(pal.cloud.mix(pal.cloudShade, 0.10).color))
+                layer.fill(body(-lx * 0.32, -0.58, 0.86), with: .color(pal.cloud.mix(pal.glow, 0.55).color(0.95)))
+                var local = PastelRNG(hatchSeed)
+                Brush.shortHatch(&layer, in: CGRect(x: cx - span, y: cy - sc * 2.5, width: span * 2, height: sc * 2.6), angle: -0.9,
+                                 density: 0.03, length: 4, color: pal.cloudShade.color(0.22), width: 0.5, rng: &local)
+            }
+            // 云底一笔暗色粉彩
+            let pts = (0...10).map { i -> CGPoint in
+                let px = cx - span * 0.45 + CGFloat(i) * span * 0.09
+                return CGPoint(x: px, y: cy - 1 + sin(px * 0.08) * sc * 0.05)
+            }
+            Brush.pastel(&ctx, points: pts, color: pal.cloudShade.mix(pal.near, 0.3).color(0.45), width: 2.4, dropout: 0.4, rng: &rng)
+        }
+
+        // 5. 地平线的雾光
+        let haze = Gradient(stops: [Gradient.Stop(color: pal.horizon.color(0), location: 0), Gradient.Stop(color: pal.horizon.color(0.75), location: 0.6),
+                                    Gradient.Stop(color: pal.horizon.color(0), location: 1)])
+        ctx.fill(Path(CGRect(x: 0, y: hy - h * 0.12, width: w, height: h * 0.2)),
+                 with: .linearGradient(haze, startPoint: CGPoint(x: 0, y: hy - h * 0.12), endPoint: CGPoint(x: 0, y: hy + h * 0.08)))
+
+        // 6. 剪影：三层，越远越淡（空气透视），受光的边用粉彩描
+        let layers: [(RGB, CGFloat, CGFloat)] = [(pal.far.mix(pal.horizon, 0.35), 0.0, 0.07), (pal.mid, 0.07, 0.11), (pal.near, 0.17, 0.14)]
         for (index, layer) in layers.enumerated() {
-            let base = horizonY + h * layer.1
+            let base = hy + h * layer.1
             let amp = h * layer.2
             let freq = rng.range(1.6, 3.2) + CGFloat(index)
             let phase = rng.range(0, 6.28)
@@ -306,10 +364,8 @@ enum SkyPainter {
             var x: CGFloat = -6
             while x <= w + 6 {
                 let t = x / w
-                // 一部分像山的缓坡，一部分像屋顶的折线，说不清是什么
                 let soft = sin(t * freq * .pi + phase) * 0.6 + sin(t * freq * 2.3 * .pi + phase * 1.7) * 0.25
-                let step = (index == 2 && rng.chance(0.18)) ? rng.range(-0.5, 0.2) : 0
-                ridge.append(CGPoint(x: x, y: base - amp * (0.4 + soft * 0.5 + step)))
+                ridge.append(CGPoint(x: x, y: base - amp * (0.4 + soft * 0.5)))
                 x += index == 2 ? 7 : 10
             }
             var land = Path()
@@ -317,47 +373,43 @@ enum SkyPainter {
             for p in ridge { land.addLine(to: p) }
             land.addLine(to: CGPoint(x: w + 6, y: h + 4))
             land.closeSubpath()
-            ctx.fill(land, with: .linearGradient(Gradient(colors: [layer.0.color, layer.0.mix(pal.near, 0.5).color]),
+            ctx.fill(land, with: .linearGradient(Gradient(colors: [layer.0.color, layer.0.mix(pal.near, 0.6).color]),
                                                  startPoint: CGPoint(x: 0, y: base - amp), endPoint: CGPoint(x: 0, y: h)))
-            Brush.pastel(&ctx, points: ridge, color: layer.0.mix(pal.horizon, 0.45).color(0.55), width: index == 0 ? 3 : 2.2, dropout: 0.35, rng: &rng)
-        }
-
-        // 5. 这一天的光点：地平线上，按时刻排开
-        for (x, tint) in marks {
-            let p = CGPoint(x: w * (0.06 + 0.88 * x), y: horizonY + h * 0.035)
-            let r = max(3, h * 0.022)
-            ctx.fill(Path(ellipseIn: CGRect(x: p.x - r * 3, y: p.y - r * 3, width: r * 6, height: r * 6)),
-                     with: .radialGradient(Gradient(colors: [tint.mix(RGB(0xFFFFFF), 0.4).color(0.7), tint.color(0)]),
-                                           center: p, startRadius: 0, endRadius: r * 3))
-            ctx.fill(Path(ellipseIn: CGRect(x: p.x - r * 0.55, y: p.y - r * 0.55, width: r * 1.1, height: r * 1.1)), with: .color(.white.opacity(0.95)))
-        }
-
-        // 6. 闪光与浮尘
-        if !night {
-            for _ in 0..<Int(rng.range(3, 6)) {
-                let p = CGPoint(x: rng.range(0, w), y: rng.range(0, horizonY * 0.9))
-                Brush.sparkle(&ctx, at: p, size: rng.range(2, 5.5), color: pal.spark.color(Double(rng.range(0.55, 0.9))))
+            Brush.pastel(&ctx, points: ridge, color: layer.0.mix(pal.glow, 0.55).color(0.7), width: index == 0 ? 2.6 : 2.0, dropout: 0.3, rng: &rng)
+            if index < 2 {
+                let mist = Gradient(colors: [pal.horizon.color(0), pal.horizon.color(0.18)])
+                ctx.fill(Path(CGRect(x: 0, y: base, width: w, height: h - base)),
+                         with: .linearGradient(mist, startPoint: CGPoint(x: 0, y: base), endPoint: CGPoint(x: 0, y: base + h * 0.12)))
             }
         }
-        var dust = Path()
-        for _ in 0..<Int(w * 0.35) {
-            let x = rng.range(0, w), y = rng.range(0, h)
-            let r = rng.range(0.4, 1.2)
-            dust.addEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
+
+        // 7. 这一天的光点：地平线上，按时刻排开
+        for (mx, tint) in marks {
+            let p = CGPoint(x: w * (0.06 + 0.88 * mx), y: hy + h * 0.03)
+            let r = max(3, h * 0.02)
+            glow(&ctx, p, r * 3.2, tint.mix(RGB(0xFFFFFF), 0.4), [(0, 0.75), (1, 0)])
+            ctx.fill(circle(p, r * 0.5), with: .color(.white.opacity(0.95)))
         }
-        ctx.fill(dust, with: .color(pal.spark.color(0.28)))
 
-        // 7. 彩铅排线：两遍不同方向，让整块颜色“是画上去的”
-        Brush.hatch(&ctx, in: CGRect(x: 0, y: 0, width: w, height: horizonY), angle: -0.95, spacing: 3.2,
-                    color: pal.zenith.mix(pal.cloudShade, 0.5).color(0.16), width: 0.55, rng: &rng)
-        Brush.hatch(&ctx, in: CGRect(x: 0, y: horizonY * 0.4, width: w, height: h), angle: -0.35, spacing: 4.2,
-                    color: pal.horizon.color(0.14), width: 0.6, rng: &rng)
-        // 暗部的几笔炭笔
-        Brush.hatch(&ctx, in: CGRect(x: 0, y: horizonY + h * 0.1, width: w, height: h * 0.3), angle: -0.6, spacing: 2.6,
-                    color: pal.near.mix(RGB(0x000000), 0.4).color(0.22), width: 0.8, rng: &rng)
+        // 8. 闪光
+        if !night {
+            for _ in 0..<Int(rng.range(3, 6.99)) {
+                Brush.sparkle(&ctx, at: CGPoint(x: rng.range(0, w), y: rng.range(0, hy * 0.9)), size: rng.range(2, 5),
+                              color: pal.spark.color(Double(rng.range(0.55, 0.9))))
+            }
+        }
 
-        // 8. 纸纹
-        Brush.grain(&ctx, size: size, density: 0.09, light: Color.white.opacity(0.16), dark: Color.black.opacity(0.07), rng: &rng)
+        // 9. 质感：彩铅短排线、暗部的炭笔、纸纹、暗角
+        Brush.shortHatch(&ctx, in: CGRect(x: 0, y: 0, width: w, height: hy), angle: -0.95, density: 0.02, length: 5,
+                         color: pal.zenith.mix(pal.cloudShade, 0.5).color(0.10), width: 0.45, rng: &rng)
+        Brush.shortHatch(&ctx, in: CGRect(x: 0, y: hy * 0.5, width: w, height: h - hy * 0.5), angle: -0.35, density: 0.015, length: 6,
+                         color: pal.horizon.color(0.12), width: 0.5, rng: &rng)
+        Brush.shortHatch(&ctx, in: CGRect(x: 0, y: hy + h * 0.12, width: w, height: h), angle: -0.6, density: 0.035, length: 4,
+                         color: pal.near.mix(RGB(0x000000), 0.4).color(0.18), width: 0.6, rng: &rng)
+        Brush.grain(&ctx, size: size, density: 0.10, light: Color.white.opacity(0.16), dark: Color.black.opacity(0.07), rng: &rng)
+        let vignette = Gradient(colors: [Color.clear, pal.near.mix(RGB(0x000000), 0.5).color(0.35)])
+        ctx.fill(Path(CGRect(x: 0, y: 0, width: w, height: h)),
+                 with: .radialGradient(vignette, center: CGPoint(x: w / 2, y: h * 0.45), startRadius: min(w, h) * 0.35, endRadius: max(w, h) * 0.75))
     }
 }
 
@@ -498,7 +550,7 @@ struct CrayonRail: View {
                 let y1 = s.height * CGFloat(i + 1) / CGFloat(steps)
                 let t = CGFloat(i) / CGFloat(max(1, steps - 1))
                 let pts = Brush.wobble(from: CGPoint(x: x, y: y0), to: CGPoint(x: x, y: y1 + 1), amount: 0.7, segments: 4, rng: &rng)
-                Brush.pastel(&ctx, points: pts, color: from.mix(to, t).color(0.85), width: 3.2, dropout: 0.28, rng: &rng)
+                Brush.pastel(&ctx, points: pts, color: from.mix(to, t).color(0.8), width: 3.6, dropout: 0.08, rng: &rng)
             }
         }
         .accessibilityHidden(true)
