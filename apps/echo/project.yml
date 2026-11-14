@@ -20,6 +20,11 @@ targets:
     sources:
       - path: App/Sources
       - path: App/Resources
+        excludes:
+          - "pi-agent.jsbundle"
+      # 打包好的 Pi 智能体内核（JavaScript），作为资源随 App 带上，运行时由 JavaScriptCore 加载
+      - path: App/Resources/pi-agent.jsbundle
+        buildPhase: resources
       - path: Shared
     dependencies:
       - target: WatchApp

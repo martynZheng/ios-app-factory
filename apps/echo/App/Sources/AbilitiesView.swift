@@ -50,6 +50,8 @@ struct AbilitiesView: View {
                         }
                         .padding(.vertical, 2)
                     }
+                    LabeledContent("智能体内核", value: Brain.usingPi ? "Pi（原版，\(PiRuntime.shared.version)）" : "内置循环（Pi 未加载）")
+                        .font(.footnote)
                 } header: {
                     Text("自带的能力")
                 } footer: {

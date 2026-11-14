@@ -12,7 +12,7 @@
 每个 App 一个目录：`apps/<name>/`（`app.env`、`project.yml`、`App/Sources`、`App/Resources`）。
 - `apps/argent` —— 银盐（胶片相机）。**目前暂停（SKIP_CI=1）**，Bundle ID 被 echo 借用。
 - `apps/starmall` —— 星光百货（女性向放置经营游戏）。**目前暂停（SKIP_CI=1）**：它的 BUNDLE_ID 还是借用的 `com.deffisoan.appfactory`（归相机用）。用户注册好 `com.deffisoan.starmall` 后：改回 starmall 的 BUNDLE_ID，删掉它的 SKIP_CI。
-- `apps/echo` —— 拾言（Apple Watch + iPhone 语音记忆助手）。含 watchOS 目标：`Watch/`（手表源码）、`Shared/`（两端共用）。**目前借用相机的 Bundle ID `com.deffisoan.appfactory`**（本应是 `com.deffisoan.echonote`），手表为 `.watchkitapp` 后缀。同一时间只能有一个 App 用这个 ID 构建。云端模型密钥只由用户在 App 设置里填，绝不写进仓库。设计与限制见 `apps/echo/README.md`。首页是对话助理（`App/Sources/Agent/`：Pi 式智能体循环 + DeepSeek 流式对话/搜索/读网页/看图/文件解析/语音识别与合成 + MCP 连接器 + 主动提醒与资讯流；头像在 `Buddy.swift`）；截图用 `-tab 3`。DeepSeek 接口的坑记在 `apps/echo/README.md` 的「常驻助理」一节。只做用户主动开始、状态可见的录音，不做隐藏/后台自启录音。
+- `apps/echo` —— 拾言（Apple Watch + iPhone 语音记忆助手）。含 watchOS 目标：`Watch/`（手表源码）、`Shared/`（两端共用）。**目前借用相机的 Bundle ID `com.deffisoan.appfactory`**（本应是 `com.deffisoan.echonote`），手表为 `.watchkitapp` 后缀。同一时间只能有一个 App 用这个 ID 构建。云端模型密钥只由用户在 App 设置里填，绝不写进仓库。设计与限制见 `apps/echo/README.md`。首页是对话助理（`App/Sources/Agent/`：原版 Pi 智能体内核跑在 JavaScriptCore 里，打包结果 `App/Resources/pi-agent.jsbundle` 由 `apps/echo/pi/` 生成并提交，改桥接层后要 `npm run build`；外加 DeepSeek 流式对话/搜索/读网页/看图/文件解析/语音识别与合成 + MCP 连接器 + 主动提醒与资讯流；头像在 `Buddy.swift`）；截图用 `-tab 3`。DeepSeek 接口的坑记在 `apps/echo/README.md` 的「常驻助理」一节。只做用户主动开始、状态可见的录音，不做隐藏/后台自启录音。
 `app.env` 里有 `SKIP_CI=1` 的 App 不会被构建。
 push 时 CI 只构建改动过的 App（改了 `fastlane/`、`.github/` 则全部构建）。先确认用户说的是哪个 App，只改那个目录。
 

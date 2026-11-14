@@ -450,7 +450,7 @@ final class Assistant: ObservableObject {
             var stopped = false
             var outOfTurns = false
             do {
-                let model = try Cloud.model(thinking: Self.deepThink)
+                _ = try Cloud.model(thinking: Self.deepThink)
                 let str: [String: Any] = ["type": "string"]
                 let strings: [String: Any] = ["type": "array", "items": str]
                 func obj(_ props: [String: Any], _ required: [String]) -> [String: Any] { ["type": "object", "properties": props, "required": required] }
@@ -545,9 +545,6 @@ final class Assistant: ObservableObject {
                 if spoken {
                     system += "\n\n我这句话是用语音说的（语音识别可能有错别字，按意思理解），你的回答会被朗读出来：像说话一样，两三句讲完，不用 Markdown、列表和链接。"
                 }
-                let agent = Agent(systemPrompt: system, tools: tools, model: model)
-                // 对话里不限制步数：它该查多少步就查多少步，你随时可以点停止。200 只是防止程序出错时无限空转。
-                agent.maxTurns = 200
                 let recent = Date().addingTimeInterval(-20 * 86_400)
                 let turns: [AgentMessage] = history.filter { !$0.failed }.map { m -> AgentMessage in
                     var t = m.text
@@ -571,31 +568,27 @@ final class Assistant: ObservableObject {
                         merged.append(turn)
                     }
                 }
-                agent.seed(merged)
-                agent.onPartial = { text in
-                    guard self.turnOpen else { return }
-                    self.status = nil
-                    self.absorb(text, final: false)
-                }
-                agent.subscribe { event in
+                // 对话里不限制步数：它该查多少步就查多少步，你随时可以点停止。200 只是防止程序出错时无限空转。
+                let reason = try await Brain.run(system: system, tools: tools, thinking: Self.deepThink, history: merged, prompt: prompt,
+                                                 images: imageJPEG.map { [$0] } ?? [], fileIDs: fileIDs, maxTurns: 200) { event in
                     switch event {
                     case .turnStart:
                         self.turnOpen = true
                         self.queuedInTurn = 0
                         spokeThisTurn = false
-                    case .messageEnd(let message):
-                        if case let .assistant(text, _, _) = message {
-                            self.turnOpen = false
-                            let said = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                            spokeThisTurn = !said.isEmpty
-                            self.absorb(said, final: true)
-                        }
-                    case .toolExecutionStart(_, let name, _):
+                    case .text(let text):
+                        guard self.turnOpen else { return }
+                        self.status = nil
+                        self.absorb(text, final: false)
+                    case .assistant(let text, _):
+                        self.turnOpen = false
+                        let said = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        spokeThisTurn = !said.isEmpty
+                        self.absorb(said, final: true)
+                    case .toolStart(let name):
                         self.status = self.statusText(name)
-                    default: break
                     }
                 }
-                let reason = try await agent.prompt(prompt, images: imageJPEG.map { [$0] } ?? [], fileIDs: fileIDs)
                 outOfTurns = reason == "max_turns"
             } catch {
                 if Task.isCancelled || (error as? URLError)?.code == .cancelled || error is CancellationError {

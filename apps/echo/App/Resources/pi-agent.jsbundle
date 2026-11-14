@@ -1,0 +1,4550 @@
+(() => {
+  // node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js
+  var FifoQueue = class {
+    incoming = [];
+    outgoing = [];
+    get length() {
+      return this.incoming.length + this.outgoing.length;
+    }
+    enqueue(value) {
+      this.incoming.push(value);
+    }
+    dequeue() {
+      if (this.outgoing.length === 0) {
+        while (this.incoming.length > 0) {
+          this.outgoing.push(this.incoming.pop());
+        }
+      }
+      return this.outgoing.pop();
+    }
+  };
+  var EventStream = class {
+    queue = new FifoQueue();
+    waiting = new FifoQueue();
+    done = false;
+    finalResultPromise;
+    resolveFinalResult;
+    isComplete;
+    extractResult;
+    constructor(isComplete, extractResult) {
+      this.isComplete = isComplete;
+      this.extractResult = extractResult;
+      this.finalResultPromise = new Promise((resolve) => {
+        this.resolveFinalResult = resolve;
+      });
+    }
+    push(event) {
+      if (this.done)
+        return;
+      if (this.isComplete(event)) {
+        this.done = true;
+        this.resolveFinalResult(this.extractResult(event));
+      }
+      const waiter = this.waiting.dequeue();
+      if (waiter) {
+        waiter({ value: event, done: false });
+      } else {
+        this.queue.enqueue(event);
+      }
+    }
+    end(result) {
+      this.done = true;
+      if (result !== void 0) {
+        this.resolveFinalResult(result);
+      }
+      while (this.waiting.length > 0) {
+        const waiter = this.waiting.dequeue();
+        waiter({ value: void 0, done: true });
+      }
+    }
+    async *[Symbol.asyncIterator]() {
+      while (true) {
+        if (this.queue.length > 0) {
+          yield this.queue.dequeue();
+        } else if (this.done) {
+          return;
+        } else {
+          const result = await new Promise((resolve) => this.waiting.enqueue(resolve));
+          if (result.done)
+            return;
+          yield result.value;
+        }
+      }
+    }
+    result() {
+      return this.finalResultPromise;
+    }
+  };
+  var AssistantMessageEventStream = class extends EventStream {
+    #startedAt = Date.now();
+    #startedAtMonotonic = performance.now();
+    constructor() {
+      super((event) => event.type === "done" || event.type === "error", (event) => {
+        if (event.type === "done") {
+          return event.message;
+        } else if (event.type === "error") {
+          return event.error;
+        }
+        throw new Error("Unexpected event type for final result");
+      });
+    }
+    push(event) {
+      if (event.type === "done")
+        this.#time(event.message);
+      else if (event.type === "error")
+        this.#time(event.error);
+      super.push(event);
+    }
+    end(result) {
+      if (result !== void 0)
+        this.#time(result);
+      super.end(result);
+    }
+    #time(message) {
+      if (this.done || message.durationMs !== void 0 || message.timestamp < this.#startedAt)
+        return;
+      message.durationMs = Math.max(0, Math.round(performance.now() - this.#startedAtMonotonic));
+    }
+  };
+  function createAssistantMessageEventStream() {
+    return new AssistantMessageEventStream();
+  }
+
+  // node_modules/@earendil-works/pi-ai/dist/utils/text.js
+  function contentText(content, separator = "\n") {
+    if (typeof content === "string")
+      return content;
+    return content.filter((block) => block.type === "text").map((block) => block.text).join(separator);
+  }
+  function getSystemMessageText(message) {
+    const parts = [contentText(message.content)];
+    for (const text of Object.values(message.sections ?? {})) {
+      if (text !== null)
+        parts.push(text);
+    }
+    return parts.filter((part) => part.length > 0).join("\n\n");
+  }
+
+  // node_modules/@earendil-works/pi-ai/dist/utils/identity.js
+  var PI_ATTRIBUTION = { name: "pi", url: "https://pi.dev", categories: ["cli-agent"] };
+  function mergeClientIdentity(...sources) {
+    let merged;
+    for (const source of sources) {
+      if (!source)
+        continue;
+      merged = { ...merged };
+      if (source.userAgent !== void 0)
+        merged.userAgent = source.userAgent;
+      if (source.attribution !== void 0)
+        merged.attribution = source.attribution;
+      if (source.version !== void 0)
+        merged.version = source.version;
+    }
+    return merged;
+  }
+
+  // node_modules/@earendil-works/pi-ai/dist/utils/transcript.js
+  function createInitialSystemMessage(systemPrompt, tools) {
+    const hasSystemPrompt = systemPrompt !== void 0 && systemPrompt.length > 0;
+    const hasTools = tools !== void 0 && tools.length > 0;
+    if (!hasSystemPrompt && !hasTools)
+      return void 0;
+    return {
+      role: "system",
+      content: systemPrompt ?? "",
+      ...hasTools ? { toolsAdded: tools } : {},
+      timestamp: 0
+    };
+  }
+  function normalizeContext(context) {
+    const initialMessage = createInitialSystemMessage(context.systemPrompt, context.tools);
+    const messages = initialMessage ? [initialMessage, ...context.messages] : context.messages;
+    return { messages };
+  }
+  function isSystemMessage(message) {
+    return message.role === "system";
+  }
+  function getCurrentTools(messages) {
+    const tools = /* @__PURE__ */ new Map();
+    for (const message of messages) {
+      if (!isSystemMessage(message))
+        continue;
+      for (const tool of message.toolsRemoved ?? [])
+        tools.delete(tool.name);
+      for (const tool of message.toolsAdded ?? [])
+        tools.set(tool.name, tool);
+    }
+    return [...tools.values()];
+  }
+  function getCurrentSystemMessage(messages) {
+    const content = [];
+    const sections = /* @__PURE__ */ new Map();
+    let timestamp;
+    for (const message of messages) {
+      if (!isSystemMessage(message))
+        continue;
+      timestamp ??= message.timestamp;
+      const text = contentText(message.content);
+      if (text.length > 0)
+        content.push(text);
+      for (const [name, value] of Object.entries(message.sections ?? {})) {
+        if (value === null)
+          sections.delete(name);
+        else
+          sections.set(name, value);
+      }
+    }
+    const tools = getCurrentTools(messages);
+    if (timestamp === void 0 && tools.length === 0)
+      return void 0;
+    return {
+      role: "system",
+      content: content.join("\n\n"),
+      ...sections.size > 0 ? { sections: Object.fromEntries(sections) } : {},
+      ...tools.length > 0 ? { toolsAdded: tools } : {},
+      timestamp: timestamp ?? 0
+    };
+  }
+  function getCurrentSystemPrompt(messages) {
+    const message = getCurrentSystemMessage(messages);
+    return message ? getSystemMessageText(message) : "";
+  }
+  function toToolDeclaration(tool) {
+    return {
+      name: tool.name,
+      description: tool.description,
+      parameters: JSON.parse(JSON.stringify(tool.parameters)),
+      ...tool.constrainedSampling === void 0 ? {} : { constrainedSampling: tool.constrainedSampling }
+    };
+  }
+  function declarationsEqual(left, right) {
+    return JSON.stringify(toToolDeclaration(left)) === JSON.stringify(toToolDeclaration(right));
+  }
+  function getToolStateChanges(previous, current) {
+    const previousTools = new Map(previous.map((tool) => [tool.name, tool]));
+    const currentTools = new Map(current.map((tool) => [tool.name, tool]));
+    return {
+      toolsAdded: current.filter((tool) => {
+        const previousTool = previousTools.get(tool.name);
+        return previousTool === void 0 || !declarationsEqual(previousTool, tool);
+      }).map(toToolDeclaration),
+      toolsRemoved: previous.filter((tool) => {
+        const currentTool = currentTools.get(tool.name);
+        return currentTool === void 0 || !declarationsEqual(tool, currentTool);
+      }).map((tool) => ({ name: tool.name }))
+    };
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/checks.js
+  var ALWAYS = () => true;
+  var NEVER = () => false;
+  var IS_STRING = (v) => typeof v === "string";
+  var IS_NUMBER = (v) => Number.isFinite(v);
+  var IS_INTEGER = (v) => Number.isInteger(v);
+  var IS_BOOLEAN = (v) => typeof v === "boolean";
+  var IS_NULL = (v) => v === null;
+  var IS_ARRAY = (v) => Array.isArray(v);
+  var IS_BYTES = (v) => v instanceof Uint8Array;
+  var IS_BIGINT = (v) => typeof v === "bigint";
+  var IS_UNDEFINED = (v) => v === void 0;
+  var IS_OBJECT = (v) => isObject(v);
+  function isObject(v) {
+    return typeof v === "object" && v !== null && !Array.isArray(v) && !(v instanceof Uint8Array);
+  }
+  var TYPE_CHECKS = /* @__PURE__ */ new Map([
+    ["string", IS_STRING],
+    ["number", IS_NUMBER],
+    ["integer", IS_INTEGER],
+    ["boolean", IS_BOOLEAN],
+    ["null", IS_NULL],
+    ["array", IS_ARRAY],
+    ["object", IS_OBJECT],
+    ["bytes", IS_BYTES],
+    ["bigint", IS_BIGINT],
+    ["undefined", IS_UNDEFINED]
+  ]);
+  var leaves = new WeakMap([
+    [IS_STRING, [1, void 0]],
+    [IS_NUMBER, [2, void 0]],
+    [IS_INTEGER, [3, void 0]],
+    [IS_BOOLEAN, [4, void 0]],
+    [IS_NULL, [5, void 0]],
+    [ALWAYS, [6, void 0]]
+  ]);
+  function leafOf(check) {
+    return leaves.get(check);
+  }
+  function leaf(code, arg, check) {
+    leaves.set(check, [code, arg]);
+    return check;
+  }
+  var Bounds = class {
+    min;
+    max;
+    xmin;
+    xmax;
+    constructor(min, max, xmin, xmax) {
+      this.min = min;
+      this.max = max;
+      this.xmin = xmin;
+      this.xmax = xmax;
+    }
+  };
+  function leafOk(code, x, arg) {
+    switch (code) {
+      case 1:
+        return typeof x === "string";
+      case 2:
+        return Number.isFinite(x);
+      case 3:
+        return Number.isInteger(x);
+      case 4:
+        return typeof x === "boolean";
+      case 5:
+        return x === null;
+      case 7:
+        return x === arg;
+      case 8: {
+        const list = arg;
+        for (let i = 0; i < list.length; i++)
+          if (list[i] === x)
+            return true;
+        return false;
+      }
+      case 9:
+        return (typeBits(x) & arg) !== 0;
+      case 10:
+        return Number.isInteger(x) && inBounds(x, arg);
+      case 11:
+        return Number.isFinite(x) && inBounds(x, arg);
+      case 12:
+        return typeof x === "string" && lengthOk(x, arg.min, arg.max);
+      case 13:
+        return typeof x === "string" && arg.test(x);
+      default:
+        return true;
+    }
+  }
+  function inBounds(x, b) {
+    return x >= b.min && x <= b.max && x > b.xmin && x < b.xmax;
+  }
+  var GUARD_NONE = 0;
+  var GUARD_STRICT = 1;
+  var GUARD_LOOSE = 2;
+  var CODE = 15;
+  var REQUIRED = 16;
+  var INHERITED = 32;
+  function and(parts) {
+    switch (parts.length) {
+      case 0:
+        return ALWAYS;
+      case 1:
+        return parts[0];
+      case 2: {
+        const [a, b] = parts;
+        return (v) => a(v) && b(v);
+      }
+      case 3: {
+        const [a, b, c] = parts;
+        return (v) => a(v) && b(v) && c(v);
+      }
+      default:
+        return (v) => {
+          for (let i = 0; i < parts.length; i++)
+            if (!parts[i](v))
+              return false;
+          return true;
+        };
+    }
+  }
+  function indirect(slot) {
+    return (v) => slot.check(v);
+  }
+  function scopedCheck(scope, uri, check) {
+    return (v) => {
+      scope.push(uri);
+      const ok = check(v);
+      scope.pop();
+      return ok;
+    };
+  }
+  function typeCheck(types) {
+    if (types.length === 1)
+      return (typeof types[0] === "string" ? TYPE_CHECKS.get(types[0]) : void 0) ?? NEVER;
+    return maskCheck(typeMask(types));
+  }
+  var TYPE_BITS = /* @__PURE__ */ new Map([
+    ["string", 1],
+    ["number", 2],
+    ["integer", 4],
+    ["boolean", 8],
+    ["null", 16],
+    ["array", 32],
+    ["object", 64],
+    ["bytes", 128],
+    ["bigint", 256],
+    ["undefined", 512]
+  ]);
+  function typeMask(types) {
+    let mask = 0;
+    for (const t of types)
+      if (typeof t === "string")
+        mask |= TYPE_BITS.get(t) ?? 0;
+    return mask;
+  }
+  function typeBits(v) {
+    switch (typeof v) {
+      case "string":
+        return 1;
+      case "number":
+        return Number.isInteger(v) ? 6 : Number.isFinite(v) ? 2 : 0;
+      case "boolean":
+        return 8;
+      case "object":
+        return v === null ? 16 : Array.isArray(v) ? 32 : v instanceof Uint8Array ? 128 : 64;
+      case "bigint":
+        return 256;
+      case "undefined":
+        return 512;
+      default:
+        return 0;
+    }
+  }
+  function maskCheck(mask) {
+    return leaf(9, mask, (v) => (typeBits(v) & mask) !== 0);
+  }
+  function maskedAnyCheck(mask, checks) {
+    if (checks.length === 0)
+      return maskCheck(mask);
+    const rest = checks.length === 1 ? checks[0] : anyCheck(checks);
+    return (v) => (typeBits(v) & mask) !== 0 || rest(v);
+  }
+  function bytesCheck(min, max) {
+    return (v) => v instanceof Uint8Array && v.length >= min && v.length <= max;
+  }
+  function codePoints(s) {
+    let n = 0;
+    for (let i = 0; i < s.length; i++, n++) {
+      const c = s.charCodeAt(i);
+      if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+        const next = s.charCodeAt(i + 1);
+        if (next >= 56320 && next <= 57343)
+          i++;
+      }
+    }
+    return n;
+  }
+  function lengthOk(s, min, max) {
+    const units = s.length;
+    if (units < min)
+      return false;
+    if (units < 2 * min && codePoints(s) < min)
+      return false;
+    return units <= max || codePoints(s) <= max;
+  }
+  function stringCheck(strict, min, max, re, format) {
+    if (re !== void 0 && min === 0 && max === Number.POSITIVE_INFINITY && format === void 0) {
+      return strict ? leaf(13, re, (v) => typeof v === "string" && re.test(v)) : (v) => typeof v !== "string" || re.test(v);
+    }
+    if (re === void 0 && format === void 0) {
+      return strict ? leaf(12, new Bounds(min, max, 0, 0), (v) => typeof v === "string" && lengthOk(v, min, max)) : (v) => typeof v !== "string" || lengthOk(v, min, max);
+    }
+    return (v) => {
+      if (typeof v !== "string")
+        return !strict;
+      return lengthOk(v, min, max) && (re === void 0 || re.test(v)) && (format === void 0 || format(v));
+    };
+  }
+  function numberCheck(mode, min, max, xmin, xmax, multipleOf) {
+    const check = (v) => {
+      if (typeof v !== "number" && typeof v !== "bigint")
+        return mode === 0;
+      if (mode === 3 ? typeof v !== "bigint" : mode !== 0 && !Number.isFinite(v))
+        return false;
+      if (mode === 2 && !Number.isInteger(v))
+        return false;
+      return v >= min && v <= max && v > xmin && v < xmax && (multipleOf === void 0 || isMultiple(v, multipleOf));
+    };
+    const plain = typeof min === "number" && typeof max === "number" && typeof xmin === "number" && typeof xmax === "number";
+    if (mode === 0 || mode === 3 || multipleOf !== void 0 || !plain)
+      return check;
+    return leaf(mode === 2 ? 10 : 11, new Bounds(min, max, xmin, xmax), check);
+  }
+  function isMultiple(v, d) {
+    if (typeof v === "bigint" || typeof d === "bigint") {
+      if (typeof v === "number" && !Number.isInteger(v) || typeof d === "number" && !Number.isInteger(d))
+        return false;
+      const divisor = BigInt(d);
+      return divisor !== 0n && BigInt(v) % divisor === 0n;
+    }
+    const q = v / d;
+    if (Number.isInteger(q))
+      return true;
+    if (!Number.isFinite(q))
+      return v % d === 0;
+    const [vc, ve] = decimal(v);
+    const [dc, de] = decimal(d);
+    return ve >= de ? vc * 10n ** BigInt(ve - de) % dc === 0n : vc % (dc * 10n ** BigInt(de - ve)) === 0n;
+  }
+  function decimal(x) {
+    const [mantissa, exponent = "0"] = Math.abs(x).toString().split("e");
+    const point = mantissa.indexOf(".");
+    const fraction = point < 0 ? 0 : mantissa.length - point - 1;
+    return [BigInt(mantissa.replace(".", "")), Number(exponent) - fraction];
+  }
+  function guardObject(inner, strict) {
+    return strict ? (v) => isObject(v) && inner(v) : (v) => !isObject(v) || inner(v);
+  }
+  function guardArray(inner, strict) {
+    return strict ? (v) => Array.isArray(v) && inner(v) : (v) => !Array.isArray(v) || inner(v);
+  }
+  function declaredObject(entries2, requiredCount, closed, guard) {
+    const n = entries2.length;
+    return (v) => {
+      if (guard !== GUARD_NONE && !isObject(v))
+        return guard === GUARD_LOOSE;
+      const o = v;
+      let required = 0;
+      let next = 0;
+      for (const k in o) {
+        let i = next;
+        if (entries2[i] !== k) {
+          i = 0;
+          while (i < n && entries2[i] !== k)
+            i += 3;
+          if (i === n) {
+            if (closed)
+              return false;
+            continue;
+          }
+        }
+        next = i + 3;
+        const x = o[k];
+        const f = entries2[i + 2];
+        if (x === void 0 && !(f & REQUIRED))
+          continue;
+        const c = f & CODE;
+        if (c !== 0 ? !leafOk(c, x, entries2[i + 1]) : !entries2[i + 1](x))
+          return false;
+        if (f & REQUIRED)
+          required++;
+      }
+      return required === requiredCount;
+    };
+  }
+  function openObject(entries2, keys, extraRequired, patterns, additional, guard) {
+    const known = patterns.length > 0 || additional !== void 0 ? new Set(keys) : void 0;
+    return (v) => {
+      if (guard !== GUARD_NONE && !isObject(v))
+        return guard === GUARD_LOOSE;
+      const o = v;
+      for (let i = 0; i < entries2.length; i += 3) {
+        const k = entries2[i];
+        const x = o[k];
+        const f = entries2[i + 2];
+        if (x === void 0 && !(f & REQUIRED && Object.hasOwn(o, k)) || f & INHERITED && !Object.hasOwn(o, k)) {
+          if (f & REQUIRED)
+            return false;
+          continue;
+        }
+        const c = f & CODE;
+        if (c !== 0 ? !leafOk(c, x, entries2[i + 1]) : !entries2[i + 1](x))
+          return false;
+      }
+      for (let i = 0; i < extraRequired.length; i++)
+        if (!Object.hasOwn(o, extraRequired[i]))
+          return false;
+      if (known === void 0)
+        return true;
+      for (const k of Object.keys(o)) {
+        let matched = known.has(k);
+        for (let i = 0; i < patterns.length; i++) {
+          if (patterns[i][0].test(k)) {
+            matched = true;
+            if (!patterns[i][1](o[k]))
+              return false;
+          }
+        }
+        if (!matched && additional !== void 0 && !additional(o[k]))
+          return false;
+      }
+      return true;
+    };
+  }
+  function propertyNamesCheck(check) {
+    return (v) => {
+      for (const k in v)
+        if (!check(k))
+          return false;
+      return true;
+    };
+  }
+  function propertyCountCheck(min, max) {
+    return (v) => {
+      let n = 0;
+      for (const _ in v)
+        n++;
+      return n >= min && n <= max;
+    };
+  }
+  function dependentRequiredCheck(entries2) {
+    return (v) => {
+      const o = v;
+      for (const [k, list] of entries2)
+        if (Object.hasOwn(o, k)) {
+          for (const r of list)
+            if (!Object.hasOwn(o, r))
+              return false;
+        }
+      return true;
+    };
+  }
+  function dependentSchemasCheck(entries2) {
+    return (v) => {
+      for (const [k, check] of entries2)
+        if (Object.hasOwn(v, k) && !check(v))
+          return false;
+      return true;
+    };
+  }
+  var NO_LEAF = [0, void 0];
+  function listCheck(guard, min, max, prefix, rest) {
+    const n = prefix.length;
+    const [code, arg] = (rest === void 0 ? void 0 : leafOf(rest)) ?? NO_LEAF;
+    return (v) => {
+      if (!Array.isArray(v))
+        return guard === GUARD_LOOSE;
+      const length = v.length;
+      if (length < min || length > max)
+        return false;
+      const m = length < n ? length : n;
+      for (let i = 0; i < m; i++)
+        if (!prefix[i](v[i]))
+          return false;
+      if (rest === void 0)
+        return true;
+      if (code !== 0) {
+        for (let i = n; i < length; i++)
+          if (!leafOk(code, v[i], arg))
+            return false;
+        return true;
+      }
+      for (let i = n; i < length; i++)
+        if (!rest(v[i]))
+          return false;
+      return true;
+    };
+  }
+  function itemsCheck(prefix, rest) {
+    return listCheck(GUARD_NONE, 0, Number.POSITIVE_INFINITY, prefix, rest);
+  }
+  function lengthCheck(min, max) {
+    return (v) => v.length >= min && v.length <= max;
+  }
+  function containsCheck(check, min, max) {
+    return (v) => {
+      const list = v;
+      let n = 0;
+      for (let i = 0; i < list.length; i++)
+        if (check(list[i]) && ++n > max)
+          return false;
+      return n >= min;
+    };
+  }
+  function uniqueCheck(v) {
+    const list = v;
+    for (let i = 1; i < list.length; i++)
+      for (let j = 0; j < i; j++)
+        if (deepEqual(list[i], list[j]))
+          return false;
+    return true;
+  }
+  function enumCheck(values) {
+    const primitives = values.filter((x) => typeof x !== "object" || x === null);
+    if (primitives.length === values.length && primitives.length <= 8) {
+      return leaf(8, primitives, (v) => {
+        for (let i = 0; i < primitives.length; i++)
+          if (primitives[i] === v)
+            return true;
+        return false;
+      });
+    }
+    const set = new Set(primitives);
+    const objects = values.filter((x) => typeof x === "object" && x !== null);
+    return (v) => set.has(v) || typeof v === "object" && objects.some((o) => deepEqual(v, o));
+  }
+  function constCheck(value) {
+    if (typeof value !== "object" || value === null)
+      return leaf(7, value, (v) => v === value);
+    return (v) => deepEqual(v, value);
+  }
+  function anyCheck(checks) {
+    return (v) => {
+      for (let i = 0; i < checks.length; i++)
+        if (checks[i](v))
+          return true;
+      return false;
+    };
+  }
+  function oneCheck(checks) {
+    return (v) => {
+      let n = 0;
+      for (let i = 0; i < checks.length; i++)
+        if (checks[i](v) && ++n > 1)
+          return false;
+      return n === 1;
+    };
+  }
+  function notCheck(check) {
+    return (v) => !check(v);
+  }
+  function ifCheck(cond, then, otherwise) {
+    return (v) => cond(v) ? then(v) : otherwise(v);
+  }
+  function taggedCheck(key, tags, checks) {
+    return (v) => {
+      if (!isObject(v))
+        return false;
+      const tag = v[key];
+      for (let i = 0; i < tags.length; i++)
+        if (tags[i] === tag)
+          return checks[i](v);
+      return false;
+    };
+  }
+  function deepEqual(a, b) {
+    if (a === b)
+      return true;
+    if (typeof a !== "object" || typeof b !== "object" || a === null || b === null)
+      return false;
+    const array = Array.isArray(a);
+    if (array !== Array.isArray(b))
+      return false;
+    if (array) {
+      const x2 = a;
+      const y2 = b;
+      if (x2.length !== y2.length)
+        return false;
+      for (let i = 0; i < x2.length; i++)
+        if (!deepEqual(x2[i], y2[i]))
+          return false;
+      return true;
+    }
+    const x = a;
+    const y = b;
+    const keys = Object.keys(x);
+    if (keys.length !== Object.keys(y).length)
+      return false;
+    for (const k of keys)
+      if (!Object.hasOwn(y, k) || !deepEqual(x[k], y[k]))
+        return false;
+    return true;
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/resolver.js
+  var DEFAULT_BASE = "https://json-schema.invalid/root.json";
+  var Resolver = class {
+    draft;
+    /** The base URI the root schema is walked from; walkers apply the root's own `$id` through `baseFor`. */
+    rootBase = DEFAULT_BASE;
+    /** Schema object to the base URI it was indexed under. */
+    baseOf = /* @__PURE__ */ new Map();
+    /** URI (with a `#name` fragment) of every `$dynamicAnchor`, to its schema. */
+    dynamicAnchors = /* @__PURE__ */ new Map();
+    root;
+    options;
+    registry = /* @__PURE__ */ new Map();
+    rejectUnresolved;
+    /** The references that named nothing and resolved to `false` (with `unresolvedRefs: "reject"`). */
+    unresolved = /* @__PURE__ */ new Set();
+    resources = /* @__PURE__ */ new Map();
+    anchors = /* @__PURE__ */ new Map();
+    indexed = false;
+    constructor(root, options) {
+      this.draft = options.draft === "7" ? "7" : "2020-12";
+      this.root = root;
+      this.options = options;
+      this.rejectUnresolved = options.unresolvedRefs === "reject";
+    }
+    /**
+     * The base URI of `node`, whose parent has `base`: its `$id` changes it, unless draft 7 makes the `$id` inert. Once
+     * the schema is indexed, the indexed base (a resolved reference target already has its own).
+     */
+    baseFor(node, base) {
+      let indexed = this.baseOf.get(node);
+      if (indexed !== void 0)
+        return indexed;
+      const id = node.$id;
+      if (typeof id !== "string")
+        return base;
+      if (!this.indexed) {
+        this.ensureIndexed();
+        indexed = this.baseOf.get(node);
+        if (indexed !== void 0)
+          return indexed;
+      }
+      if (this.draft === "7" && (typeof node.$ref === "string" || id.startsWith("#")))
+        return base;
+      return documentOf(resolveUri(id, base));
+    }
+    /** Indexes the root schema and the registered documents' URIs (once). */
+    ensureIndexed() {
+      if (this.indexed)
+        return;
+      this.indexed = true;
+      for (const [uri, schema] of Object.entries(this.options.schemas ?? {})) {
+        this.registry.set(documentOf(resolveUri(uri, DEFAULT_BASE)), schema);
+      }
+      this.resources.set(DEFAULT_BASE, this.root);
+      this.index(this.root, DEFAULT_BASE);
+    }
+    /**
+     * The schema a reference names, with the base URI it compiles under. Throws if it names nothing, or, with
+     * `unresolvedRefs: "reject"`, resolves to `false`, the schema no value passes.
+     */
+    resolve(ref, base) {
+      this.ensureIndexed();
+      if (!this.rejectUnresolved)
+        return this.find(ref, base);
+      try {
+        return this.find(ref, base);
+      } catch {
+        this.unresolved.add(resolveUri(ref, base));
+        return { node: false, base };
+      }
+    }
+    /** Whether `ref`, from `base`, named nothing and resolved to `false`. */
+    isUnresolved(ref, base) {
+      return this.unresolved.has(resolveUri(ref, base));
+    }
+    find(ref, base) {
+      const uri = resolveUri(ref, base);
+      const doc = documentOf(uri);
+      const fragment = uri.length > doc.length ? decodeURIComponent(uri.slice(doc.length + 1)) : "";
+      const root = this.resources.has(doc) ? this.resources.get(doc) : this.load(doc);
+      if (root === void 0)
+        throw new Error(`Unresolved $ref ${ref} (no schema registered for ${doc})`);
+      if (fragment === "")
+        return { node: root, base: doc };
+      if (fragment.startsWith("/"))
+        return this.pointer(root, doc, fragment);
+      const target = this.anchors.get(`${doc}#${fragment}`);
+      if (target === void 0)
+        throw new Error(`Unresolved $ref ${ref} (no anchor ${fragment} in ${doc})`);
+      return { node: target, base: this.baseOf.get(target) ?? doc };
+    }
+    /** Whether `node` is the root of the schema resource at `base`. */
+    isResource(node, base) {
+      this.ensureIndexed();
+      return this.resources.get(base) === node;
+    }
+    // Walks only keywords that hold subschemas: an `$id` inside `enum`, `const` or an unknown keyword names nothing.
+    index(node, base) {
+      if (!isSchemaObject(node) || this.baseOf.has(node))
+        return;
+      let b = base;
+      const refOnly = this.draft === "7" && typeof node.$ref === "string";
+      if (!refOnly && typeof node.$id === "string") {
+        if (this.draft === "7" && node.$id.startsWith("#"))
+          this.anchors.set(documentOf(b) + node.$id, node);
+        else {
+          const uri = resolveUri(node.$id, b);
+          b = documentOf(uri);
+          this.resources.set(b, node);
+          if (uri.length > b.length + 1)
+            this.anchors.set(uri, node);
+        }
+      }
+      this.baseOf.set(node, b);
+      if (refOnly)
+        return;
+      if (this.draft !== "7") {
+        if (typeof node.$anchor === "string")
+          this.anchors.set(`${b}#${node.$anchor}`, node);
+        if (typeof node.$dynamicAnchor === "string") {
+          this.anchors.set(`${b}#${node.$dynamicAnchor}`, node);
+          this.dynamicAnchors.set(`${b}#${node.$dynamicAnchor}`, node);
+        }
+      }
+      for (const key of SCHEMA_KEYWORDS)
+        this.index(node[key], b);
+      for (const key of MAP_KEYWORDS) {
+        const map = node[key];
+        if (isSchemaObject(map))
+          for (const k of Object.keys(map))
+            this.index(map[k], b);
+      }
+      for (const key of ARRAY_KEYWORDS) {
+        const list = node[key];
+        if (Array.isArray(list))
+          for (const s of list)
+            this.index(s, b);
+      }
+    }
+    load(doc) {
+      const schema = this.registry.get(doc);
+      if (schema === void 0)
+        return void 0;
+      this.resources.set(doc, schema);
+      this.index(schema, doc);
+      return schema;
+    }
+    pointer(root, base, fragment) {
+      let node = root;
+      let b = base;
+      for (const raw of fragment.split("/").slice(1)) {
+        const key = raw.replace(/~1/g, "/").replace(/~0/g, "~");
+        node = typeof node === "object" && node !== null && Object.hasOwn(node, key) ? node[key] : void 0;
+        if (node === void 0)
+          throw new Error(`Unresolved $ref #${fragment} in ${base}`);
+        if (typeof node === "object" && node !== null)
+          b = this.baseOf.get(node) ?? b;
+      }
+      return { node, base: b };
+    }
+  };
+  var SCHEMA_KEYWORDS = [
+    "additionalProperties",
+    "propertyNames",
+    "contains",
+    "not",
+    "if",
+    "then",
+    "else",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+    "additionalItems",
+    "contentSchema",
+    "items"
+  ];
+  var MAP_KEYWORDS = ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies"];
+  var ARRAY_KEYWORDS = ["allOf", "anyOf", "oneOf", "prefixItems", "items"];
+  function isSchemaObject(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  function resolveUri(ref, base) {
+    try {
+      return new URL(ref, base).href;
+    } catch {
+      return ref.startsWith("#") ? documentOf(base) + ref : ref;
+    }
+  }
+  function documentOf(uri) {
+    const hash = uri.indexOf("#");
+    return hash < 0 ? uri : uri.slice(0, hash);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/shared.js
+  function sharedRegex(source) {
+    const hit = regexes.get(source)?.deref();
+    if (hit !== void 0)
+      return hit;
+    let re;
+    try {
+      re = new RegExp(source, "u");
+    } catch {
+      re = new RegExp(source);
+    }
+    regexes.set(source, new WeakRef(re));
+    regexCleanup.register(re, source);
+    return re;
+  }
+  var regexes = /* @__PURE__ */ new Map();
+  var regexCleanup = new FinalizationRegistry((source) => {
+    if (regexes.get(source)?.deref() === void 0)
+      regexes.delete(source);
+  });
+
+  // node_modules/@earendil-works/pi-schema/dist/coerce.js
+  var Coercer = class {
+    c;
+    schema;
+    /**
+     * The (schema node, value) pairs pass 2 is converting through a re-entry point, as a stack. Conversion can enter
+     * a node again with the same value only through a `$ref` or by wrapping a single value into an array (also for
+     * schemas that cycle through shared JS objects): a recursive schema that meets a value no branch accepts would
+     * convert it without end. A pair already on the stack (primitives by value, objects by reference) leaves the value
+     * unchanged. Only those two points push, so schemas without references or wraps pay nothing.
+     */
+    entered = [];
+    /** How often a re-entry was cut short in this coerce() call; results computed across one are not memoized. */
+    cuts = 0;
+    /**
+     * Results of `$ref` targets by (node, value) within one coerce() call: a recursive union whose branches all
+     * convert the same children (and all fail) would convert them once per branch, exponentially in the depth.
+     */
+    memo = void 0;
+    constructor(compiler2, schema) {
+      this.c = compiler2;
+      this.schema = schema;
+    }
+    /** `value` coerced: a copy along the changed paths only, or `value` itself when nothing changes. */
+    coerce(value) {
+      const base = this.c.r.rootBase;
+      const withoutNulls = this.dropOptionalNulls(value, this.schema, base);
+      return this.coerceTypes(this.convertOnly(withoutNulls), this.schema, base);
+    }
+    /** Pass 2 alone, as TypeBox's `Value.Convert` (the TypeBox conformance tests run it). */
+    convertOnly(value) {
+      try {
+        return this.convert(this.schema, this.c.r.rootBase, value);
+      } finally {
+        this.memo = void 0;
+        this.cuts = 0;
+      }
+    }
+    /** `node` converted for `value` at a re-entry point: unchanged when that pair is already being converted. */
+    reenter(node, base, value, memoize) {
+      const entered = this.entered;
+      for (let i = 0; i < entered.length; i += 2) {
+        if (entered[i] === node && Object.is(entered[i + 1], value)) {
+          this.cuts++;
+          return value;
+        }
+      }
+      const memo = memoize ? this.memo?.get(node) : void 0;
+      if (memo?.has(value))
+        return memo.get(value);
+      const cuts = this.cuts;
+      entered.push(node, value);
+      let result;
+      try {
+        result = this.convert(node, base, value);
+      } finally {
+        entered.length -= 2;
+      }
+      if (memoize && this.cuts === cuts) {
+        this.memo ??= /* @__PURE__ */ new Map();
+        let values = this.memo.get(node);
+        if (values === void 0) {
+          values = /* @__PURE__ */ new Map();
+          this.memo.set(node, values);
+        }
+        values.set(value, result);
+      }
+      return result;
+    }
+    /** Whether `value` passes the schema `node`; undefined when `node` cannot be compiled. */
+    passes(node, base, value) {
+      try {
+        return this.c.check(node, this.baseOf(node, base))(value);
+      } catch {
+        return void 0;
+      }
+    }
+    baseOf(node, base) {
+      return isSchemaObject(node) ? this.c.r.baseFor(node, base) : base;
+    }
+    // ---------------------------------------------------------------------------------------------------------------
+    // Pass 1: optional nulls
+    // ---------------------------------------------------------------------------------------------------------------
+    dropOptionalNulls(value, schema, base) {
+      if (!isSchemaObject(schema))
+        return value;
+      const b = this.baseOf(schema, base);
+      if (Array.isArray(value)) {
+        return mapItems(value, (item, i) => {
+          const itemSchema = itemSchemaAt(schema, i);
+          return itemSchema === void 0 ? item : this.dropOptionalNulls(item, itemSchema, b);
+        });
+      }
+      if (!isPlainObject(value))
+        return value;
+      const properties = isSchemaObject(schema.properties) ? schema.properties : {};
+      const patterns = isSchemaObject(schema.patternProperties) ? Object.entries(schema.patternProperties).map(([pattern, item]) => [sharedRegex(pattern), item]) : [];
+      const additional = isSchemaObject(schema.additionalProperties) ? schema.additionalProperties : void 0;
+      if (patterns.length === 0 && additional === void 0 && !isSchemaObject(schema.properties))
+        return value;
+      const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+      let out;
+      const set = (key, next) => {
+        if (next === (out ?? value)[key])
+          return;
+        out ??= { ...value };
+        out[key] = next;
+      };
+      for (const [key, property] of Object.entries(properties)) {
+        if (!Object.hasOwn(value, key))
+          continue;
+        const isRef = isSchemaObject(property) && typeof property.$ref === "string";
+        if (value[key] === null && !required.has(key) && !isRef && this.passes(property, b, null) === false) {
+          out ??= { ...value };
+          delete out[key];
+          continue;
+        }
+        set(key, this.dropOptionalNulls(value[key], property, b));
+      }
+      if (patterns.length > 0 || additional !== void 0) {
+        for (const key of Object.keys(value)) {
+          let matched = Object.hasOwn(properties, key);
+          for (const [pattern, item] of patterns) {
+            if (!pattern.test(key))
+              continue;
+            matched = true;
+            set(key, this.dropOptionalNulls((out ?? value)[key], item, b));
+          }
+          if (!matched && additional !== void 0)
+            set(key, this.dropOptionalNulls(value[key], additional, b));
+        }
+      }
+      return out ?? value;
+    }
+    // ---------------------------------------------------------------------------------------------------------------
+    // Pass 2: TypeBox's conversion rules
+    // ---------------------------------------------------------------------------------------------------------------
+    convert(node, base, value) {
+      if (!isSchemaObject(node))
+        return value;
+      const b = this.baseOf(node, base);
+      if (typeof node.$ref === "string") {
+        let target;
+        try {
+          target = this.c.r.resolve(node.$ref, b);
+        } catch {
+          return value;
+        }
+        return isSchemaObject(target.node) ? this.reenter(target.node, target.base, value, true) : value;
+      }
+      return this.convertNode(node, b, value);
+    }
+    /** One schema node's conversion: its first keyword among `const`, `enum`, the unions, `allOf` and `type`. */
+    convertNode(node, b, value) {
+      if (Object.hasOwn(node, "const"))
+        return convertLiteral(node.const, value);
+      if (Array.isArray(node.enum))
+        return this.convertEnum(node, node.enum, b, value);
+      if (Array.isArray(node.anyOf))
+        return this.convertUnion(node, node.anyOf, b, value);
+      if (Array.isArray(node.oneOf))
+        return this.convertUnion(node, node.oneOf, b, value);
+      if (Array.isArray(node.allOf)) {
+        let next = value;
+        for (const member of node.allOf)
+          next = this.convert(member, b, next);
+        return this.convertMembers(node, b, next);
+      }
+      switch (node.type) {
+        case "string":
+          return orValue(tryString(value), value);
+        case "number":
+          return orValue(tryNumber(value), value);
+        case "integer": {
+          const result = tryNumber(value);
+          return result === void 0 ? value : Math.trunc(result.value);
+        }
+        case "boolean":
+          return orValue(tryBoolean(value), value);
+        case "null":
+          return orValue(tryNull(value), value);
+        case "bigint":
+          return orValue(tryBigInt(value), value);
+        case "undefined":
+          return orValue(tryUndefined(value), value);
+        case "array":
+          return this.convertArray(node, b, value);
+        case "object":
+          return this.convertObject(node, b, value);
+        case void 0:
+          if (node.properties !== void 0 || node.patternProperties !== void 0) {
+            return this.convertObject(node, b, value);
+          }
+          if (node.items !== void 0 || node.prefixItems !== void 0)
+            return this.convertArray(node, b, value);
+          return value;
+        default:
+          return value;
+      }
+    }
+    /** An enum is a union of its values: a member stays, else the first value the input converts to. */
+    convertEnum(node, values, base, value) {
+      if (values.some((member) => member === value))
+        return value;
+      for (const member of values) {
+        const candidate = convertLiteral(member, value);
+        if (candidate !== value && this.passes(node, base, candidate) === true)
+          return candidate;
+      }
+      return value;
+    }
+    /**
+     * A value one branch accepts stays; else the first branch's conversion that the whole union accepts. Branches are
+     * converted in order and only until one is accepted, so a later recursive branch is not entered needlessly. A node
+     * that also declares members (plain JSON Schema; TypeBox's never do) converts them into each candidate before it is
+     * checked, so a branch is not discarded for a sibling property that is converted after it.
+     */
+    convertUnion(node, branches, base, value) {
+      if (branches.some((branch) => this.passes(branch, base, value) === true))
+        return this.convertMembers(node, base, value);
+      for (const branch of branches) {
+        const candidate = this.convertMembers(node, base, this.convert(branch, base, value));
+        if (this.passes(node, base, candidate) === true)
+          return candidate;
+      }
+      return this.convertMembers(node, base, value);
+    }
+    /** The object members of a union or intersection node, when it declares any. */
+    convertMembers(node, base, value) {
+      const declares = node.properties !== void 0 || node.patternProperties !== void 0 || node.additionalProperties !== void 0;
+      return declares ? this.convertObject(node, base, value) : value;
+    }
+    convertArray(node, base, value) {
+      const prefix = Array.isArray(node.items) ? node.items : Array.isArray(node.prefixItems) ? node.prefixItems : void 0;
+      if (prefix !== void 0) {
+        if (!Array.isArray(value))
+          return value;
+        const rest = Array.isArray(node.items) ? void 0 : node.items;
+        return mapItems(value, (item2, i) => {
+          const schema = i < prefix.length ? prefix[i] : rest;
+          return schema === void 0 ? item2 : this.convert(schema, base, item2);
+        });
+      }
+      if (Array.isArray(value)) {
+        return node.items === void 0 ? value : mapItems(value, (item2) => this.convert(node.items, base, item2));
+      }
+      const item = node.items;
+      return [isSchemaObject(item) ? this.reenter(item, base, value, false) : value];
+    }
+    convertObject(node, base, value) {
+      if (!isPlainObject(value))
+        return value;
+      const properties = isSchemaObject(node.properties) ? node.properties : {};
+      const patterns = isSchemaObject(node.patternProperties) ? Object.entries(node.patternProperties).map(([pattern, schema]) => [sharedRegex(pattern), schema]) : [];
+      const additional = isSchemaObject(node.additionalProperties) ? node.additionalProperties : void 0;
+      let out;
+      for (const key of Object.keys(value)) {
+        if (value[key] === void 0)
+          continue;
+        let next = value[key];
+        let matched = Object.hasOwn(properties, key);
+        if (matched)
+          next = this.convert(properties[key], base, next);
+        for (const [pattern, schema] of patterns) {
+          if (!pattern.test(key))
+            continue;
+          matched = true;
+          next = this.convert(schema, base, next);
+        }
+        if (!matched && additional !== void 0)
+          next = this.convert(additional, base, next);
+        if (next !== value[key]) {
+          out ??= { ...value };
+          out[key] = next;
+        }
+      }
+      return out ?? value;
+    }
+    // ---------------------------------------------------------------------------------------------------------------
+    // Pass 3: primitive coercion by type
+    // ---------------------------------------------------------------------------------------------------------------
+    coerceTypes(value, schema, base) {
+      if (!isSchemaObject(schema))
+        return value;
+      const b = this.baseOf(schema, base);
+      let next = value;
+      if (Array.isArray(schema.allOf))
+        for (const member of schema.allOf)
+          next = this.coerceTypes(next, member, b);
+      if (Array.isArray(schema.anyOf))
+        next = this.coerceUnion(next, schema.anyOf, b);
+      if (Array.isArray(schema.oneOf))
+        next = this.coerceUnion(next, schema.oneOf, b);
+      const types = typesOf(schema);
+      const matchesUnionMember = types.length > 1 && types.some((type) => matchesType(next, type));
+      if (types.length > 0 && !matchesUnionMember) {
+        for (const type of types) {
+          const candidate = coercePrimitive(next, type);
+          if (candidate !== next) {
+            next = candidate;
+            break;
+          }
+        }
+      }
+      if (types.includes("object") && isPlainObject(next))
+        next = this.coerceProperties(next, schema, b);
+      if (types.includes("array") && Array.isArray(next))
+        next = this.coerceItems(next, schema, b);
+      return next;
+    }
+    coerceUnion(value, branches, base) {
+      for (const branch of branches)
+        if (this.passes(branch, base, value) === true)
+          return value;
+      for (const branch of branches) {
+        const coerced = this.coerceTypes(value, branch, base);
+        if (this.passes(branch, base, coerced) === true)
+          return coerced;
+      }
+      return value;
+    }
+    coerceProperties(value, schema, base) {
+      const properties = isSchemaObject(schema.properties) ? schema.properties : {};
+      const patterns = isSchemaObject(schema.patternProperties) ? Object.entries(schema.patternProperties).map(([pattern, item]) => [sharedRegex(pattern), item]) : [];
+      const additional = isSchemaObject(schema.additionalProperties) ? schema.additionalProperties : void 0;
+      let out;
+      const set = (key, next) => {
+        if (next === (out ?? value)[key])
+          return;
+        out ??= { ...value };
+        out[key] = next;
+      };
+      for (const [key, property] of Object.entries(properties)) {
+        if (key in value)
+          set(key, this.coerceTypes(value[key], property, base));
+      }
+      for (const key of Object.keys(value)) {
+        let matched = Object.hasOwn(properties, key);
+        for (const [pattern, item] of patterns) {
+          if (!pattern.test(key))
+            continue;
+          matched = true;
+          set(key, this.coerceTypes((out ?? value)[key], item, base));
+        }
+        if (!matched && additional !== void 0)
+          set(key, this.coerceTypes(value[key], additional, base));
+      }
+      return out ?? value;
+    }
+    coerceItems(value, schema, base) {
+      return mapItems(value, (item, i) => {
+        const itemSchema = itemSchemaAt(schema, i);
+        return isSchemaObject(itemSchema) ? this.coerceTypes(item, itemSchema, base) : item;
+      });
+    }
+  };
+  function itemSchemaAt(schema, index) {
+    if (Array.isArray(schema.items))
+      return schema.items[index];
+    if (Array.isArray(schema.prefixItems) && index < schema.prefixItems.length)
+      return schema.prefixItems[index];
+    return schema.items;
+  }
+  function mapItems(items, map) {
+    let out;
+    for (let i = 0; i < items.length; i++) {
+      const next = map(items[i], i);
+      if (next === items[i])
+        continue;
+      out ??= items.slice();
+      out[i] = next;
+    }
+    return out ?? items;
+  }
+  function orValue(result, value) {
+    return result === void 0 ? value : result.value;
+  }
+  function convertLiteral(literal, value) {
+    if (literal === value)
+      return value;
+    const result = typeof literal === "string" ? tryString(value) : typeof literal === "number" ? tryNumber(value) : typeof literal === "boolean" ? tryBoolean(value) : typeof literal === "bigint" ? tryBigInt(value) : void 0;
+    return result !== void 0 && result.value === literal ? result.value : value;
+  }
+  function tryString(value) {
+    if (typeof value === "bigint" || typeof value === "boolean" || isFiniteNumber(value))
+      return { value: String(value) };
+    if (value === null)
+      return { value: "null" };
+    if (typeof value === "string")
+      return { value };
+    if (value === void 0)
+      return { value: "" };
+    return void 0;
+  }
+  var MAX_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
+  var MIN_BIGINT = BigInt(Number.MIN_SAFE_INTEGER);
+  function tryNumber(value) {
+    if (typeof value === "bigint")
+      return value <= MAX_BIGINT && value >= MIN_BIGINT ? { value: Number(value) } : void 0;
+    if (typeof value === "boolean")
+      return { value: value ? 1 : 0 };
+    if (isFiniteNumber(value))
+      return { value };
+    if (value === null || value === void 0)
+      return { value: 0 };
+    if (typeof value !== "string")
+      return void 0;
+    const coerced = +value;
+    if (Number.isFinite(coerced))
+      return { value: coerced };
+    const lowercase = value.toLowerCase();
+    if (lowercase === "false")
+      return { value: 0 };
+    if (lowercase === "true")
+      return { value: 1 };
+    const big = bigIntOfString(value);
+    return big !== void 0 && big <= MAX_BIGINT && big >= MIN_BIGINT ? { value: Number(big) } : void 0;
+  }
+  function bigIntOfString(value) {
+    if (/^-?(0|[1-9]\d*)n$/.test(value))
+      return BigInt(value.slice(0, -1));
+    if (/^-?(0|[1-9]\d*)\.\d+$/.test(value))
+      return BigInt(value.split(".")[0]);
+    if (/^-?(0|[1-9]\d*)$/.test(value))
+      return BigInt(value);
+    return void 0;
+  }
+  function tryBigInt(value) {
+    if (typeof value === "bigint")
+      return { value };
+    if (typeof value === "boolean")
+      return { value: value ? 1n : 0n };
+    if (isFiniteNumber(value))
+      return { value: BigInt(Math.trunc(value)) };
+    if (value === null || value === void 0)
+      return { value: 0n };
+    if (typeof value !== "string")
+      return void 0;
+    const big = bigIntOfString(value);
+    if (big !== void 0)
+      return { value: big };
+    const lowercase = value.toLowerCase();
+    return lowercase === "false" ? { value: 0n } : lowercase === "true" ? { value: 1n } : void 0;
+  }
+  function tryUndefined(value) {
+    if (value === void 0 || value === null || value === 0n || value === false || value === 0)
+      return { value: void 0 };
+    if (typeof value !== "string")
+      return void 0;
+    const lowercase = value.toLowerCase();
+    return lowercase === "undefined" || lowercase === "null" || value === "" || value === "0" ? { value: void 0 } : void 0;
+  }
+  function tryBoolean(value) {
+    if (typeof value === "bigint")
+      return value === 0n ? { value: false } : value === 1n ? { value: true } : void 0;
+    if (typeof value === "boolean")
+      return { value };
+    if (isFiniteNumber(value))
+      return value === 0 ? { value: false } : value === 1 ? { value: true } : void 0;
+    if (value === null || value === void 0)
+      return { value: false };
+    if (typeof value !== "string")
+      return void 0;
+    const lowercase = value.toLowerCase();
+    if (lowercase === "false" || value === "0")
+      return { value: false };
+    if (lowercase === "true" || value === "1")
+      return { value: true };
+    return void 0;
+  }
+  function tryNull(value) {
+    if (typeof value === "bigint")
+      return value === 0n ? { value: null } : void 0;
+    if (typeof value === "boolean")
+      return value === false ? { value: null } : void 0;
+    if (isFiniteNumber(value))
+      return value === 0 ? { value: null } : void 0;
+    if (value === null || value === void 0)
+      return { value: null };
+    if (typeof value !== "string")
+      return void 0;
+    const lowercase = value.toLowerCase();
+    return lowercase === "undefined" || lowercase === "null" || value === "" || value === "0" ? { value: null } : void 0;
+  }
+  function isFiniteNumber(value) {
+    return typeof value === "number" && Number.isFinite(value);
+  }
+  function typesOf(schema) {
+    if (typeof schema.type === "string")
+      return [schema.type];
+    if (Array.isArray(schema.type))
+      return schema.type.filter((type) => typeof type === "string");
+    return [];
+  }
+  function matchesType(value, type) {
+    switch (type) {
+      case "number":
+        return Number.isFinite(value);
+      case "integer":
+        return typeof value === "number" && Number.isInteger(value);
+      case "boolean":
+        return typeof value === "boolean";
+      case "string":
+        return typeof value === "string";
+      case "null":
+        return value === null;
+      case "bigint":
+        return typeof value === "bigint";
+      case "undefined":
+        return value === void 0;
+      case "array":
+        return Array.isArray(value);
+      case "object":
+        return isPlainObject(value);
+      default:
+        return false;
+    }
+  }
+  function coercePrimitive(value, type) {
+    switch (type) {
+      case "number":
+      case "integer": {
+        if (value === null)
+          return 0;
+        if (typeof value === "string" && value.trim() !== "") {
+          const parsed = Number(value);
+          if (type === "number" ? Number.isFinite(parsed) : Number.isInteger(parsed))
+            return parsed;
+        }
+        if (typeof value === "boolean")
+          return value ? 1 : 0;
+        return value;
+      }
+      case "boolean":
+        if (value === null)
+          return false;
+        if (value === "true" || value === 1)
+          return true;
+        if (value === "false" || value === 0)
+          return false;
+        return value;
+      case "string":
+        if (value === null)
+          return "";
+        if (typeof value === "number" || typeof value === "boolean")
+          return String(value);
+        return value;
+      case "null":
+        return value === "" || value === 0 || value === false ? null : value;
+      default:
+        return value;
+    }
+  }
+  function isPlainObject(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/annotations.js
+  function newAnnotations() {
+    return { props: null, allProps: false, items: 0, allItems: false, indexes: null };
+  }
+  function merge(a, b) {
+    if (b.props !== null)
+      for (const k of b.props)
+        addProp(a, k);
+    a.allProps ||= b.allProps;
+    if (b.items > a.items)
+      a.items = b.items;
+    a.allItems ||= b.allItems;
+    if (b.indexes !== null)
+      for (const i of b.indexes)
+        addIndex(a, i);
+  }
+  function addProp(a, key) {
+    if (a.props === null)
+      a.props = /* @__PURE__ */ new Set();
+    a.props.add(key);
+  }
+  function addIndex(a, index) {
+    if (a.indexes === null)
+      a.indexes = /* @__PURE__ */ new Set();
+    a.indexes.add(index);
+  }
+  var ANNOTATING_TRUE = () => true;
+  var ANNOTATING_FALSE = () => false;
+  function indirectAnnotating(slot) {
+    return (v, a) => slot.check(v, a);
+  }
+  function ignoreAnnotations(check) {
+    return (v) => check(v);
+  }
+  function withFreshAnnotations(check) {
+    return (v) => check(v, newAnnotations());
+  }
+  function scopedAnnotating(scope, uri, check) {
+    return (v, a) => {
+      scope.push(uri);
+      const ok = check(v, a);
+      scope.pop();
+      return ok;
+    };
+  }
+  function isolateAnnotations(check) {
+    return (v, a) => {
+      const b = newAnnotations();
+      if (!check(v, b))
+        return false;
+      merge(a, b);
+      return true;
+    };
+  }
+  function annotateAll(plain, parts) {
+    return (v, a) => {
+      if (!plain(v))
+        return false;
+      for (let i = 0; i < parts.length; i++)
+        if (!parts[i](v, a))
+          return false;
+      return true;
+    };
+  }
+  function annotateObject(props, patterns, additional) {
+    const declared = new Set(props.map(([k]) => k));
+    return (v, a) => {
+      if (!isObject(v))
+        return true;
+      const seen = [];
+      for (const [k, check] of props) {
+        if (!Object.hasOwn(v, k))
+          continue;
+        if (!check(v[k]))
+          return false;
+        seen.push(k);
+      }
+      for (const k of Object.keys(v)) {
+        let matched = declared.has(k);
+        for (const [re, check] of patterns) {
+          if (re.test(k)) {
+            if (!check(v[k]))
+              return false;
+            matched = true;
+            seen.push(k);
+          }
+        }
+        if (!matched && additional !== void 0) {
+          if (!additional(v[k]))
+            return false;
+          seen.push(k);
+        }
+      }
+      for (const k of seen)
+        addProp(a, k);
+      return true;
+    };
+  }
+  function annotateArray(prefix, rest, contains, minContains, maxContains) {
+    return (v, a) => {
+      if (!Array.isArray(v))
+        return true;
+      const m = Math.min(v.length, prefix.length);
+      for (let i = 0; i < m; i++)
+        if (!prefix[i](v[i]))
+          return false;
+      if (rest !== void 0) {
+        for (let i = prefix.length; i < v.length; i++)
+          if (!rest(v[i]))
+            return false;
+        a.allItems = true;
+      }
+      if (m > a.items)
+        a.items = m;
+      if (contains !== void 0) {
+        let n = 0;
+        for (let i = 0; i < v.length; i++) {
+          if (contains(v[i])) {
+            n++;
+            addIndex(a, i);
+          }
+        }
+        if (n < minContains || n > maxContains)
+          return false;
+      }
+      return true;
+    };
+  }
+  function annotateAny(branches, exactlyOne) {
+    return (v, a) => {
+      let n = 0;
+      for (const branch of branches) {
+        const b = newAnnotations();
+        if (branch(v, b)) {
+          n++;
+          merge(a, b);
+        }
+      }
+      return exactlyOne ? n === 1 : n > 0;
+    };
+  }
+  function annotateIf(cond, then, otherwise) {
+    return (v, a) => {
+      const b = newAnnotations();
+      if (cond(v, b)) {
+        merge(a, b);
+        return then === void 0 || then(v, a);
+      }
+      return otherwise === void 0 || otherwise(v, a);
+    };
+  }
+  function annotateDependent(key, check) {
+    return (v, a) => !isObject(v) || !Object.hasOwn(v, key) || check(v, a);
+  }
+  function unevaluatedProperties(check) {
+    return (v, a) => {
+      if (!isObject(v) || a.allProps)
+        return true;
+      for (const k of Object.keys(v))
+        if (!(a.props?.has(k) ?? false) && !check(v[k]))
+          return false;
+      a.allProps = true;
+      return true;
+    };
+  }
+  function unevaluatedItems(check) {
+    return (v, a) => {
+      if (!Array.isArray(v) || a.allItems)
+        return true;
+      for (let i = a.items; i < v.length; i++)
+        if (!(a.indexes?.has(i) ?? false) && !check(v[i]))
+          return false;
+      a.allItems = true;
+      return true;
+    };
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/compiler.js
+  var RESTART = Symbol("restart");
+  var Compiler = class {
+    r;
+    draft;
+    formats;
+    /** Whether checks track the dynamic scope (the schema has a bookended `$dynamicRef`). */
+    dynamic;
+    schema;
+    scope;
+    cache = /* @__PURE__ */ new Map();
+    annotatingCache = /* @__PURE__ */ new Map();
+    constructor(schema, options, dynamic) {
+      this.schema = schema;
+      this.r = new Resolver(schema, options);
+      this.draft = this.r.draft;
+      this.formats = options.formats;
+      this.dynamic = dynamic;
+      this.scope = [];
+    }
+    /** The check of the root schema. */
+    root() {
+      return this.check(this.schema, this.r.rootBase);
+    }
+    /** The check of a schema (cached by schema object; a recursive reference goes through an indirection). */
+    check(node, base) {
+      if (node === true)
+        return ALWAYS;
+      if (node === false)
+        return NEVER;
+      if (!isSchemaObject(node))
+        throw new Error(`A schema must be an object or a boolean, got ${JSON.stringify(node)}`);
+      const cached = this.cache.get(node);
+      if (cached !== void 0)
+        return cached;
+      const bare = this.bareType(node);
+      if (bare !== void 0)
+        return bare;
+      const slot = { check: void 0 };
+      this.cache.set(node, indirect(slot));
+      const check = this.build(node, this.r.baseFor(node, base));
+      slot.check = check;
+      this.cache.set(node, check);
+      return check;
+    }
+    build(node, base) {
+      if (this.draft === "7" && typeof node.$ref === "string")
+        return this.ref(node.$ref, base);
+      if (this.draft !== "7" && (node.unevaluatedProperties !== void 0 || node.unevaluatedItems !== void 0)) {
+        return withFreshAnnotations(this.annotating(node, base));
+      }
+      const check = this.plain(node, base);
+      return this.dynamic && this.r.isResource(node, base) ? scopedCheck(this.scope, base, check) : check;
+    }
+    /**
+     * The module-level check of a schema that is only a `type` (with annotations), `ALWAYS` for one with no assertion
+     * at all; undefined for every other schema. These are the most common subschemas and cost nothing to share.
+     */
+    bareType(node) {
+      let type;
+      for (const k in node) {
+        if (k === "type")
+          type = node.type;
+        else if (!NEUTRAL_KEYWORDS.has(k))
+          return void 0;
+      }
+      if (type === void 0)
+        return ALWAYS;
+      return typeof type === "string" ? TYPE_CHECKS.get(type) : void 0;
+    }
+    /** Every keyword of `node`, not tracking annotations. */
+    plain(node, base) {
+      const parts = [];
+      const types = node.type === void 0 ? void 0 : Array.isArray(node.type) ? node.type : [node.type];
+      const single = types?.length === 1 ? types[0] : void 0;
+      let typeInGroup = false;
+      if (single === "bytes") {
+        parts.push(bytesCheck(number(node.minLength) ?? 0, number(node.maxLength) ?? Number.POSITIVE_INFINITY));
+        typeInGroup = true;
+      } else {
+        const string = this.stringGroup(node, single === "string");
+        if (string !== void 0)
+          parts.push(string);
+        const numeric = single === "number" || single === "integer" || single === "bigint";
+        const mode = single === "number" ? 1 : single === "integer" ? 2 : single === "bigint" ? 3 : 0;
+        const number2 = this.numberGroup(node, mode);
+        if (number2 !== void 0)
+          parts.push(number2);
+        const object = this.objectGroup(node, base, single === "object");
+        if (object !== void 0)
+          parts.push(object);
+        const array = this.arrayGroup(node, base, single === "array");
+        if (array !== void 0)
+          parts.push(array);
+        typeInGroup = single === "string" && string !== void 0 || numeric && number2 !== void 0 || single === "object" && object !== void 0 || single === "array" && array !== void 0;
+      }
+      if (types !== void 0 && !typeInGroup)
+        parts.unshift(typeCheck(types));
+      this.inPlace(node, base, parts);
+      return and(parts);
+    }
+    // The keywords that apply to the value itself, whatever its type.
+    inPlace(node, base, parts) {
+      if (Array.isArray(node.enum))
+        parts.push(enumCheck(node.enum));
+      if (Object.hasOwn(node, "const"))
+        parts.push(constCheck(node.const));
+      if (Array.isArray(node.allOf))
+        parts.push(and(node.allOf.map((s) => this.check(s, base))));
+      if (Array.isArray(node.anyOf))
+        parts.push(this.union(node.anyOf, base, false));
+      if (Array.isArray(node.oneOf))
+        parts.push(this.union(node.oneOf, base, true));
+      if (node.not !== void 0)
+        parts.push(notCheck(this.check(node.not, base)));
+      if (node.if !== void 0 && (node.then !== void 0 || node.else !== void 0)) {
+        const then = node.then === void 0 ? ALWAYS : this.check(node.then, base);
+        const otherwise = node.else === void 0 ? ALWAYS : this.check(node.else, base);
+        parts.push(ifCheck(this.check(node.if, base), then, otherwise));
+      }
+      if (typeof node.$ref === "string")
+        parts.push(this.ref(node.$ref, base));
+      if (this.draft !== "7" && typeof node.$dynamicRef === "string") {
+        parts.push(this.dynamicRef(node.$dynamicRef, base));
+      }
+    }
+    union(branches, base, exactlyOne) {
+      const checks = () => branches.map((s) => this.check(s, base));
+      return constUnion(branches, exactlyOne) ?? this.tagged(branches, base) ?? (exactlyOne ? oneCheck(checks()) : anyOf(checks()));
+    }
+    ref(ref, base) {
+      const target = this.r.resolve(ref, base);
+      const check = this.check(target.node, target.base);
+      return this.dynamic && target.base !== base ? scopedCheck(this.scope, target.base, check) : check;
+    }
+    dynamicRef(ref, base) {
+      const resolved = this.bookended(ref, base);
+      if (resolved === void 0)
+        return this.ref(ref, base);
+      const { initial, name } = resolved;
+      const fallback = this.check(initial.node, initial.base);
+      const lookup = this.dynamicLookup(name, (node, b) => this.check(node, b));
+      const scope = this.scope;
+      return (v) => {
+        for (let i = 0; i < scope.length; i++) {
+          const check = lookup(scope[i]);
+          if (check !== null)
+            return check(v);
+        }
+        return fallback(v);
+      };
+    }
+    /** The initial target and anchor name of a `$dynamicRef` that resolves dynamically, or undefined for a plain ref. */
+    bookended(ref, base) {
+      const initial = this.r.resolve(ref, base);
+      const uri = resolveUri(ref, base);
+      const name = uri.slice(documentOf(uri).length + 1);
+      const anchored = isSchemaObject(initial.node) && initial.node.$dynamicAnchor === name;
+      if (name === "" || name.startsWith("/") || !anchored)
+        return void 0;
+      if (!this.dynamic)
+        throw RESTART;
+      return { initial, name };
+    }
+    // Resolved at run time against the dynamic scope, so a schema with a bookended $dynamicRef keeps its compiler.
+    dynamicLookup(name, compile2) {
+      const found = /* @__PURE__ */ new Map();
+      return (uri) => {
+        const key = `${uri}#${name}`;
+        let check = found.get(key);
+        if (check === void 0) {
+          const target = this.r.dynamicAnchors.get(key);
+          check = target === void 0 ? null : compile2(target, this.r.baseOf.get(target) ?? uri);
+          found.set(key, check);
+        }
+        return check;
+      };
+    }
+    /** anyOf/oneOf whose branches are all objects with a distinct required const on one key: the tag picks the branch. */
+    tagged(branches, base) {
+      if (branches.length < 2)
+        return void 0;
+      const resolved = [];
+      for (const branch of branches) {
+        if (!isSchemaObject(branch))
+          return void 0;
+        const ref = typeof branch.$ref === "string" && Object.keys(branch).length === 1 ? branch.$ref : void 0;
+        const node = ref === void 0 ? branch : this.r.resolve(ref, this.r.baseFor(branch, base)).node;
+        if (!isSchemaObject(node))
+          return void 0;
+        resolved.push(node);
+      }
+      const first = resolved[0].properties;
+      if (!isSchemaObject(first))
+        return void 0;
+      for (const key of Object.keys(first)) {
+        const tags = resolved.map((s) => tagOf(s, key));
+        if (tags.some((t) => t === void 0) || new Set(tags).size !== tags.length)
+          continue;
+        return taggedCheck(key, tags, branches.map((s) => this.check(s, base)));
+      }
+      return void 0;
+    }
+    stringGroup(node, strict) {
+      const min = number(node.minLength) ?? 0;
+      const max = number(node.maxLength) ?? Number.POSITIVE_INFINITY;
+      const re = typeof node.pattern === "string" ? sharedRegex(node.pattern) : void 0;
+      const format = this.formats !== void 0 && typeof node.format === "string" && Object.hasOwn(this.formats, node.format) ? this.formats[node.format] : void 0;
+      if (min === 0 && max === Number.POSITIVE_INFINITY && re === void 0 && format === void 0)
+        return void 0;
+      return stringCheck(strict, min, max, re, format);
+    }
+    numberGroup(node, mode) {
+      const min = bound(node.minimum);
+      const max = bound(node.maximum);
+      const xmin = bound(node.exclusiveMinimum);
+      const xmax = bound(node.exclusiveMaximum);
+      const multipleOf = bound(node.multipleOf);
+      if ([min, max, xmin, xmax, multipleOf].every((x) => x === void 0))
+        return void 0;
+      const inf = Number.POSITIVE_INFINITY;
+      return numberCheck(mode, min ?? -inf, max ?? inf, xmin ?? -inf, xmax ?? inf, multipleOf);
+    }
+    objectGroup(node, base, strict) {
+      const onlyCore = OBJECT_EXTRAS.every((k) => node[k] === void 0);
+      const core = this.objectCore(node, base, onlyCore ? strict ? GUARD_STRICT : GUARD_LOOSE : GUARD_NONE);
+      if (core !== void 0 && onlyCore)
+        return core;
+      const parts = core === void 0 ? [] : [core];
+      if (node.propertyNames !== void 0)
+        parts.push(propertyNamesCheck(this.check(node.propertyNames, base)));
+      const minProperties = number(node.minProperties);
+      const maxProperties = number(node.maxProperties);
+      if (minProperties !== void 0 || maxProperties !== void 0) {
+        parts.push(propertyCountCheck(minProperties ?? 0, maxProperties ?? Number.POSITIVE_INFINITY));
+      }
+      const dependentRequired = [];
+      const dependentSchemas = [];
+      if (this.draft !== "7") {
+        for (const [k, list] of entries(node.dependentRequired))
+          if (Array.isArray(list))
+            dependentRequired.push([k, list]);
+        for (const [k, s] of entries(node.dependentSchemas))
+          dependentSchemas.push([k, this.check(s, base)]);
+      }
+      for (const [k, d] of entries(node.dependencies)) {
+        if (Array.isArray(d))
+          dependentRequired.push([k, d]);
+        else
+          dependentSchemas.push([k, this.check(d, base)]);
+      }
+      if (dependentRequired.length > 0)
+        parts.push(dependentRequiredCheck(dependentRequired));
+      if (dependentSchemas.length > 0)
+        parts.push(dependentSchemasCheck(dependentSchemas));
+      if (parts.length === 0)
+        return strict ? IS_OBJECT : void 0;
+      return guardObject(and(parts), strict);
+    }
+    objectCore(node, base, guard) {
+      const properties = isSchemaObject(node.properties) ? node.properties : {};
+      const required = Array.isArray(node.required) ? node.required.filter((k) => typeof k === "string") : [];
+      const patterns = isSchemaObject(node.patternProperties) ? node.patternProperties : {};
+      const additional = node.additionalProperties;
+      const keys = Object.keys(properties);
+      const patternKeys = Object.keys(patterns);
+      if (keys.length + required.length + patternKeys.length === 0 && (additional === void 0 || additional === true)) {
+        return void 0;
+      }
+      const entries2 = [];
+      for (const k of keys) {
+        const check = this.check(properties[k], base);
+        const leaf2 = leafOf(check);
+        const flags = (leaf2?.[0] ?? 0) | (required.includes(k) ? REQUIRED : 0) | (k in Object.prototype ? INHERITED : 0);
+        entries2.push(k, leaf2 === void 0 ? check : leaf2[1], flags);
+      }
+      const extraRequired = required.filter((k) => !Object.hasOwn(properties, k));
+      const pats = patternKeys.map((p) => [sharedRegex(p), this.check(patterns[p], base)]);
+      const extra = additional === void 0 || additional === true ? void 0 : this.check(additional, base);
+      if (pats.length === 0 && extraRequired.length === 0 && (extra === void 0 || additional === false)) {
+        const requiredCount = keys.filter((k) => required.includes(k)).length;
+        return declaredObject(entries2, requiredCount, additional === false, guard);
+      }
+      return openObject(entries2, keys, extraRequired, pats, extra, guard);
+    }
+    arrayGroup(node, base, strict) {
+      let prefix = [];
+      let rest;
+      if (Array.isArray(node.items)) {
+        prefix = node.items;
+        rest = node.additionalItems;
+      } else {
+        if (this.draft !== "7" && Array.isArray(node.prefixItems))
+          prefix = node.prefixItems;
+        rest = node.items;
+      }
+      const prefixChecks = prefix.map((s) => this.check(s, base));
+      const restCheck = rest === void 0 || rest === true ? void 0 : this.check(rest, base);
+      const minItems = number(node.minItems);
+      const maxItems = number(node.maxItems);
+      if (node.contains === void 0 && node.uniqueItems !== true && (prefixChecks.length > 0 || restCheck !== void 0)) {
+        const guard = strict ? GUARD_STRICT : GUARD_LOOSE;
+        return listCheck(guard, minItems ?? 0, maxItems ?? Number.POSITIVE_INFINITY, prefixChecks, restCheck);
+      }
+      const parts = [];
+      if (prefixChecks.length > 0 || restCheck !== void 0)
+        parts.push(itemsCheck(prefixChecks, restCheck));
+      if (minItems !== void 0 || maxItems !== void 0) {
+        parts.push(lengthCheck(minItems ?? 0, maxItems ?? Number.POSITIVE_INFINITY));
+      }
+      if (node.contains !== void 0) {
+        const min = this.draft === "7" ? 1 : number(node.minContains) ?? 1;
+        const max = this.draft === "7" ? Number.POSITIVE_INFINITY : number(node.maxContains) ?? Number.POSITIVE_INFINITY;
+        parts.push(containsCheck(this.check(node.contains, base), min, max));
+      }
+      if (node.uniqueItems === true)
+        parts.push(uniqueCheck);
+      if (parts.length === 0)
+        return strict ? IS_ARRAY : void 0;
+      return guardArray(and(parts), strict);
+    }
+    /** The annotating check of a schema evaluated in place (only below `unevaluatedProperties`/`unevaluatedItems`). */
+    annotating(node, base) {
+      if (node === true)
+        return ANNOTATING_TRUE;
+      if (node === false)
+        return ANNOTATING_FALSE;
+      if (!isSchemaObject(node))
+        throw new Error(`A schema must be an object or a boolean, got ${JSON.stringify(node)}`);
+      const cached = this.annotatingCache.get(node);
+      if (cached !== void 0)
+        return cached;
+      const slot = { check: void 0 };
+      this.annotatingCache.set(node, indirectAnnotating(slot));
+      const check = this.buildAnnotating(node, this.r.baseFor(node, base));
+      slot.check = check;
+      this.annotatingCache.set(node, check);
+      return check;
+    }
+    buildAnnotating(node, base) {
+      const rest = {};
+      let annotates = false;
+      for (const k of Object.keys(node)) {
+        if (ANNOTATING.has(k))
+          annotates = true;
+        else
+          rest[k] = node[k];
+      }
+      const plain = this.plain(rest, base);
+      const parts = [];
+      if (annotates)
+        this.annotatingParts(node, base, parts);
+      const all = parts.length === 0 ? ignoreAnnotations(plain) : annotateAll(plain, parts);
+      const own = node.unevaluatedProperties !== void 0 || node.unevaluatedItems !== void 0 ? isolateAnnotations(all) : all;
+      return this.dynamic && this.r.isResource(node, base) ? scopedAnnotating(this.scope, base, own) : own;
+    }
+    annotatingParts(node, base, parts) {
+      if (node.properties !== void 0 || node.patternProperties !== void 0 || node.additionalProperties !== void 0) {
+        const props = entries(node.properties).map(([k, s]) => [k, this.check(s, base)]);
+        const pats = entries(node.patternProperties).map(([p, s]) => [sharedRegex(p), this.check(s, base)]);
+        const extra = node.additionalProperties === void 0 ? void 0 : this.check(node.additionalProperties, base);
+        parts.push(annotateObject(props, pats, extra));
+      }
+      if (node.prefixItems !== void 0 || node.items !== void 0 || node.contains !== void 0) {
+        const prefix = Array.isArray(node.prefixItems) ? node.prefixItems : Array.isArray(node.items) ? node.items : [];
+        const rest = Array.isArray(node.items) ? node.additionalItems : node.items;
+        parts.push(annotateArray(prefix.map((s) => this.check(s, base)), rest === void 0 ? void 0 : this.check(rest, base), node.contains === void 0 ? void 0 : this.check(node.contains, base), number(node.minContains) ?? 1, number(node.maxContains) ?? Number.POSITIVE_INFINITY));
+      }
+      if (Array.isArray(node.allOf))
+        for (const s of node.allOf)
+          parts.push(this.annotating(s, base));
+      if (Array.isArray(node.anyOf))
+        parts.push(annotateAny(node.anyOf.map((s) => this.annotating(s, base)), false));
+      if (Array.isArray(node.oneOf))
+        parts.push(annotateAny(node.oneOf.map((s) => this.annotating(s, base)), true));
+      if (node.if !== void 0) {
+        const then = node.then === void 0 ? void 0 : this.annotating(node.then, base);
+        const otherwise = node.else === void 0 ? void 0 : this.annotating(node.else, base);
+        parts.push(annotateIf(this.annotating(node.if, base), then, otherwise));
+      }
+      if (typeof node.$ref === "string")
+        parts.push(this.annotatingRef(node.$ref, base));
+      if (typeof node.$dynamicRef === "string")
+        parts.push(this.annotatingDynamicRef(node.$dynamicRef, base));
+      for (const [k, s] of entries(node.dependentSchemas))
+        parts.push(annotateDependent(k, this.annotating(s, base)));
+      if (node.unevaluatedProperties !== void 0) {
+        parts.push(unevaluatedProperties(this.check(node.unevaluatedProperties, base)));
+      }
+      if (node.unevaluatedItems !== void 0)
+        parts.push(unevaluatedItems(this.check(node.unevaluatedItems, base)));
+    }
+    annotatingRef(ref, base) {
+      const target = this.r.resolve(ref, base);
+      const check = this.annotating(target.node, target.base);
+      return this.dynamic && target.base !== base ? scopedAnnotating(this.scope, target.base, check) : check;
+    }
+    annotatingDynamicRef(ref, base) {
+      const resolved = this.bookended(ref, base);
+      if (resolved === void 0)
+        return this.annotatingRef(ref, base);
+      const { initial, name } = resolved;
+      const fallback = this.annotating(initial.node, initial.base);
+      const lookup = this.dynamicLookup(name, (node, b) => this.annotating(node, b));
+      const scope = this.scope;
+      return (v, a) => {
+        for (let i = 0; i < scope.length; i++) {
+          const check = lookup(scope[i]);
+          if (check !== null)
+            return check(v, a);
+        }
+        return fallback(v, a);
+      };
+    }
+  };
+  var NEUTRAL_KEYWORDS = /* @__PURE__ */ new Set([
+    "$schema",
+    "$comment",
+    "title",
+    "description",
+    "default",
+    "examples",
+    "deprecated",
+    "readOnly",
+    "writeOnly",
+    "$defs",
+    "definitions",
+    "contentEncoding",
+    "contentMediaType",
+    "minContains",
+    "maxContains",
+    "$vocabulary"
+  ]);
+  var OBJECT_EXTRAS = [
+    "propertyNames",
+    "minProperties",
+    "maxProperties",
+    "dependentRequired",
+    "dependentSchemas",
+    "dependencies"
+  ];
+  var ANNOTATING = /* @__PURE__ */ new Set([
+    "properties",
+    "patternProperties",
+    "additionalProperties",
+    "prefixItems",
+    "items",
+    "additionalItems",
+    "contains",
+    "minContains",
+    "maxContains",
+    "allOf",
+    "anyOf",
+    "oneOf",
+    "if",
+    "then",
+    "else",
+    "$ref",
+    "$dynamicRef",
+    "dependentSchemas",
+    "unevaluatedProperties",
+    "unevaluatedItems"
+  ]);
+  function constUnion(branches, exactlyOne) {
+    const values = [];
+    for (const branch of branches) {
+      if (!isSchemaObject(branch) || !Object.hasOwn(branch, "const"))
+        return void 0;
+      for (const k of Object.keys(branch))
+        if (k !== "const" && !NEUTRAL_KEYWORDS.has(k))
+          return void 0;
+      if (typeof branch.const === "object" && branch.const !== null)
+        return void 0;
+      if (exactlyOne && values.includes(branch.const))
+        return void 0;
+      values.push(branch.const);
+    }
+    return enumCheck(values);
+  }
+  function anyOf(checks) {
+    const types = [];
+    const rest = [];
+    for (const check of checks) {
+      const type = BARE_TYPES.get(check);
+      if (type === void 0)
+        rest.push(check);
+      else
+        types.push(type);
+    }
+    return types.length === 0 ? anyCheck(rest) : maskedAnyCheck(typeMask(types), rest);
+  }
+  var BARE_TYPES = new Map([...TYPE_CHECKS].map(([type, check]) => [check, type]));
+  function tagOf(branch, key) {
+    const properties = branch.properties;
+    if (branch.type !== "object" || !Array.isArray(branch.required) || !branch.required.includes(key))
+      return void 0;
+    const tag = isSchemaObject(properties) ? properties[key] : void 0;
+    if (!isSchemaObject(tag) || !Object.hasOwn(tag, "const"))
+      return void 0;
+    return typeof tag.const === "object" && tag.const !== null ? void 0 : tag.const;
+  }
+  function bound(value) {
+    return typeof value === "number" || typeof value === "bigint" ? value : void 0;
+  }
+  function number(value) {
+    return typeof value === "number" ? value : void 0;
+  }
+  function entries(value) {
+    return isSchemaObject(value) ? Object.entries(value) : [];
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/explain.js
+  var Explainer = class {
+    c;
+    schema;
+    /**
+     * The errors of `$ref` targets for object values, within one errors() call: a recursive union explains each branch
+     * to pick the one to blame, and every branch would explain the same children again, exponentially in the depth.
+     */
+    memo = void 0;
+    constructor(compiler2, schema) {
+      this.c = compiler2;
+      this.schema = schema;
+      compiler2.root();
+    }
+    /** The errors of `value`, at least one (`value` failed the check). */
+    errors(value) {
+      const out = [];
+      try {
+        this.walk(this.schema, this.c.r.rootBase, value, "", out);
+      } finally {
+        this.memo = void 0;
+      }
+      if (out.length === 0)
+        out.push({ path: "", keyword: "schema", message: "invalid" });
+      return out;
+    }
+    ok(node, base, v) {
+      return this.c.check(node, base)(v);
+    }
+    // For $dynamicRef schemas this check runs outside the original dynamic scope, so their errors are approximate.
+    walk(node, base, v, path, out) {
+      if (node === true)
+        return;
+      if (node === false) {
+        out.push({ path, keyword: "false", message: "no value is allowed here" });
+        return;
+      }
+      if (!isSchemaObject(node))
+        return;
+      const b = this.c.r.baseFor(node, base);
+      if (this.ok(node, b, v))
+        return;
+      const start = out.length;
+      const push = (keyword, message, at = path) => {
+        out.push({ path: at, keyword, message });
+      };
+      if (this.c.draft === "7" && typeof node.$ref === "string") {
+        this.walkRef(node.$ref, b, v, path, out);
+        return;
+      }
+      if (node.type !== void 0) {
+        const types = Array.isArray(node.type) ? node.type : [node.type];
+        const checks = types.map((t) => (typeof t === "string" ? TYPE_CHECKS.get(t) : void 0) ?? NEVER);
+        if (!checks.some((check) => check(v))) {
+          push("type", `expected ${types.join(" or ")}, got ${typeName(v)}`);
+          return;
+        }
+      }
+      if (Array.isArray(node.enum) && !enumCheck(node.enum)(v))
+        push("enum", `expected one of ${listValues(node.enum)}`);
+      if (Object.hasOwn(node, "const") && !constCheck(node.const)(v))
+        push("const", `expected ${JSON.stringify(node.const)}`);
+      if (typeof v === "string" && node.type !== "bytes")
+        this.walkString(node, v, push);
+      if (v instanceof Uint8Array && node.type === "bytes")
+        this.walkBytes(node, v, push);
+      if (typeof v === "number" || typeof v === "bigint")
+        this.walkNumber(node, v, push);
+      if (isObject(v))
+        this.walkObject(node, b, v, path, out, push);
+      if (Array.isArray(v))
+        this.walkArray(node, b, v, path, out, push);
+      if (Array.isArray(node.allOf))
+        for (const s of node.allOf)
+          this.walk(s, b, v, path, out);
+      if (Array.isArray(node.anyOf))
+        this.walkUnion(node.anyOf, b, v, path, out, false);
+      if (Array.isArray(node.oneOf))
+        this.walkUnion(node.oneOf, b, v, path, out, true);
+      if (node.not !== void 0 && this.ok(node.not, b, v))
+        push("not", "must not match the schema in not");
+      if (node.if !== void 0) {
+        const branch = this.ok(node.if, b, v) ? node.then : node.else;
+        if (branch !== void 0)
+          this.walk(branch, b, v, path, out);
+      }
+      if (typeof node.$ref === "string")
+        this.walkRef(node.$ref, b, v, path, out);
+      if (out.length === start && (node.unevaluatedProperties !== void 0 || node.unevaluatedItems !== void 0)) {
+        this.walkUnevaluated(node, b, v, path, out);
+      }
+      if (out.length === start && typeof node.$dynamicRef === "string") {
+        push("$dynamicRef", "does not match the dynamically referenced schema");
+      }
+    }
+    walkRef(ref, base, v, path, out) {
+      const target = this.c.r.resolve(ref, base);
+      if (target.node === false && this.c.r.isUnresolved(ref, base)) {
+        out.push({ path, keyword: "$ref", message: `unresolved reference ${ref}` });
+        return;
+      }
+      if (!isSchemaObject(target.node) || typeof v !== "object" || v === null) {
+        this.walk(target.node, target.base, v, path, out);
+        return;
+      }
+      this.memo ??= /* @__PURE__ */ new Map();
+      let values = this.memo.get(target.node);
+      const known = values?.get(v);
+      if (known !== void 0 && known.path === path) {
+        out.push(...known.errors);
+        return;
+      }
+      const errors = [];
+      this.walk(target.node, target.base, v, path, errors);
+      if (values === void 0) {
+        values = /* @__PURE__ */ new Map();
+        this.memo.set(target.node, values);
+      }
+      values.set(v, { path, errors });
+      out.push(...errors);
+    }
+    walkString(node, v, push) {
+      const n = codePoints(v);
+      if (typeof node.minLength === "number" && n < node.minLength) {
+        push("minLength", `expected at least ${node.minLength} characters`);
+      }
+      if (typeof node.maxLength === "number" && n > node.maxLength) {
+        push("maxLength", `expected at most ${node.maxLength} characters`);
+      }
+      if (typeof node.pattern === "string" && !sharedRegex(node.pattern).test(v)) {
+        push("pattern", `expected to match ${node.pattern}`);
+      }
+      const formats2 = this.c.formats;
+      const format = formats2 !== void 0 && typeof node.format === "string" && Object.hasOwn(formats2, node.format) ? formats2[node.format] : void 0;
+      if (format !== void 0 && !format(v))
+        push("format", `expected format ${node.format}`);
+    }
+    walkBytes(node, v, push) {
+      if (typeof node.minLength === "number" && v.length < node.minLength) {
+        push("minLength", `expected at least ${node.minLength} bytes`);
+      }
+      if (typeof node.maxLength === "number" && v.length > node.maxLength) {
+        push("maxLength", `expected at most ${node.maxLength} bytes`);
+      }
+    }
+    // Numbers and bigints alike: bounds of either kind compare with values of either kind.
+    walkNumber(node, v, push) {
+      const { minimum, maximum, exclusiveMinimum, exclusiveMaximum, multipleOf } = node;
+      if (isBound(minimum) && v < minimum)
+        push("minimum", `expected >= ${minimum}`);
+      if (isBound(maximum) && v > maximum)
+        push("maximum", `expected <= ${maximum}`);
+      if (isBound(exclusiveMinimum) && v <= exclusiveMinimum)
+        push("exclusiveMinimum", `expected > ${exclusiveMinimum}`);
+      if (isBound(exclusiveMaximum) && v >= exclusiveMaximum)
+        push("exclusiveMaximum", `expected < ${exclusiveMaximum}`);
+      if (isBound(multipleOf) && !isMultiple(v, multipleOf))
+        push("multipleOf", `expected a multiple of ${multipleOf}`);
+    }
+    walkObject(node, b, v, path, out, push) {
+      const properties = isSchemaObject(node.properties) ? node.properties : {};
+      const required = Array.isArray(node.required) ? node.required : [];
+      for (const k of required) {
+        if (typeof k !== "string")
+          continue;
+        const accepted = v[k] === void 0 && Object.hasOwn(properties, k) && this.ok(properties[k], b, void 0);
+        if (!Object.hasOwn(v, k) || v[k] === void 0 && !accepted)
+          push("required", "missing", pointer(path, k));
+      }
+      for (const k of Object.keys(properties)) {
+        if (Object.hasOwn(v, k) && v[k] !== void 0)
+          this.walk(properties[k], b, v[k], pointer(path, k), out);
+      }
+      const patterns = isSchemaObject(node.patternProperties) ? Object.entries(node.patternProperties) : [];
+      for (const k of Object.keys(v)) {
+        let matched = Object.hasOwn(properties, k);
+        for (const [p, s] of patterns) {
+          if (sharedRegex(p).test(k)) {
+            matched = true;
+            this.walk(s, b, v[k], pointer(path, k), out);
+          }
+        }
+        if (!matched && node.additionalProperties !== void 0) {
+          if (node.additionalProperties === false)
+            push("additionalProperties", "unknown field", pointer(path, k));
+          else
+            this.walk(node.additionalProperties, b, v[k], pointer(path, k), out);
+        }
+        if (node.propertyNames !== void 0 && !this.ok(node.propertyNames, b, k)) {
+          push("propertyNames", "invalid property name", pointer(path, k));
+        }
+      }
+      const count = Object.keys(v).length;
+      if (typeof node.minProperties === "number" && count < node.minProperties) {
+        push("minProperties", `expected at least ${node.minProperties} properties`);
+      }
+      if (typeof node.maxProperties === "number" && count > node.maxProperties) {
+        push("maxProperties", `expected at most ${node.maxProperties} properties`);
+      }
+      const dependencies = {
+        ...this.c.draft === "7" || !isSchemaObject(node.dependentRequired) ? {} : node.dependentRequired,
+        ...isSchemaObject(node.dependencies) ? node.dependencies : {}
+      };
+      for (const [k, d] of Object.entries(dependencies)) {
+        if (!Object.hasOwn(v, k))
+          continue;
+        if (!Array.isArray(d))
+          this.walk(d, b, v, path, out);
+        else
+          for (const r of d)
+            if (!Object.hasOwn(v, r))
+              push("dependentRequired", `required when ${k} is present`, pointer(path, r));
+      }
+      if (this.c.draft !== "7" && isSchemaObject(node.dependentSchemas)) {
+        for (const [k, s] of Object.entries(node.dependentSchemas))
+          if (Object.hasOwn(v, k))
+            this.walk(s, b, v, path, out);
+      }
+    }
+    walkArray(node, b, v, path, out, push) {
+      let prefix = [];
+      let rest;
+      if (Array.isArray(node.items)) {
+        prefix = node.items;
+        rest = node.additionalItems;
+      } else {
+        if (this.c.draft !== "7" && Array.isArray(node.prefixItems))
+          prefix = node.prefixItems;
+        rest = node.items;
+      }
+      for (let i = 0; i < v.length; i++) {
+        const s = i < prefix.length ? prefix[i] : rest;
+        if (s !== void 0)
+          this.walk(s, b, v[i], `${path}/${i}`, out);
+      }
+      if (typeof node.minItems === "number" && v.length < node.minItems) {
+        push("minItems", `expected at least ${node.minItems} items`);
+      }
+      if (typeof node.maxItems === "number" && v.length > node.maxItems) {
+        push("maxItems", `expected at most ${node.maxItems} items`);
+      }
+      if (node.uniqueItems === true && !uniqueCheck(v))
+        push("uniqueItems", "expected unique items");
+      if (node.contains !== void 0) {
+        const draft7 = this.c.draft === "7";
+        const min = draft7 || typeof node.minContains !== "number" ? 1 : node.minContains;
+        const max = draft7 || typeof node.maxContains !== "number" ? Number.POSITIVE_INFINITY : node.maxContains;
+        if (!containsCheck(this.c.check(node.contains, b), min, max)(v)) {
+          push("contains", containsMessage(min, max));
+        }
+      }
+    }
+    walkUnion(branches, b, v, path, out, exactlyOne) {
+      const matches = branches.filter((s) => this.ok(s, b, v)).length;
+      if (matches === 1 || !exactlyOne && matches > 0)
+        return;
+      const keyword = exactlyOne ? "oneOf" : "anyOf";
+      if (matches > 1) {
+        out.push({ path, keyword, message: "matches more than one alternative" });
+        return;
+      }
+      const tag = this.tagOf(branches, b);
+      if (tag !== void 0 && isObject(v)) {
+        const i = tag.values.indexOf(v[tag.key]);
+        if (i < 0)
+          out.push({
+            path: pointer(path, tag.key),
+            keyword,
+            message: `expected one of ${listValues(tag.values)}`
+          });
+        else
+          this.walk(branches[i], b, v, path, out);
+        return;
+      }
+      let best;
+      for (const s of branches) {
+        const errors = [];
+        this.walk(s, b, v, path, errors);
+        if (errors.length === 0)
+          continue;
+        const declared = isObject(v) ? this.declaredKeys(s, b, v) : 0;
+        const better = best === void 0 || declared > best.declared || declared === best.declared && errors[0].path.length > best.errors[0].path.length;
+        if (better)
+          best = { errors, declared };
+      }
+      out.push(...best?.errors ?? [{ path, keyword, message: "matches no alternative" }]);
+    }
+    /** How many of the keys of `v` the branch `s` (through a `$ref`) declares in `properties`. */
+    declaredKeys(s, b, v) {
+      const node = isSchemaObject(s) && typeof s.$ref === "string" ? this.c.r.resolve(s.$ref, this.c.r.baseFor(s, b)).node : s;
+      const properties = isSchemaObject(node) && isSchemaObject(node.properties) ? node.properties : {};
+      return Object.keys(v).filter((k) => Object.hasOwn(properties, k)).length;
+    }
+    tagOf(branches, b) {
+      const resolved = branches.map((s) => isSchemaObject(s) && typeof s.$ref === "string" ? this.c.r.resolve(s.$ref, this.c.r.baseFor(s, b)).node : s);
+      const first = resolved[0];
+      if (!isSchemaObject(first) || !isSchemaObject(first.properties))
+        return void 0;
+      for (const key of Object.keys(first.properties)) {
+        const values = resolved.map((s) => {
+          const tag = isSchemaObject(s) && isSchemaObject(s.properties) ? s.properties[key] : void 0;
+          return isSchemaObject(tag) ? tag.const : void 0;
+        });
+        const primitive = values.every((x) => x !== void 0 && (typeof x !== "object" || x === null));
+        if (primitive && new Set(values).size === values.length)
+          return { key, values };
+      }
+      return void 0;
+    }
+    walkUnevaluated(node, b, v, path, out) {
+      const { unevaluatedProperties: unevaluatedProperties2, unevaluatedItems: unevaluatedItems2, $id: _id, ...rest } = node;
+      const a = newAnnotations();
+      this.c.annotating(rest, b)(v, a);
+      if (isObject(v) && unevaluatedProperties2 !== void 0 && !a.allProps) {
+        for (const k of Object.keys(v)) {
+          if (a.props?.has(k))
+            continue;
+          if (unevaluatedProperties2 === false) {
+            out.push({ path: pointer(path, k), keyword: "unevaluatedProperties", message: "unknown field" });
+          } else
+            this.walk(unevaluatedProperties2, b, v[k], pointer(path, k), out);
+        }
+      }
+      if (Array.isArray(v) && unevaluatedItems2 !== void 0 && !a.allItems) {
+        for (let i = a.items; i < v.length; i++) {
+          if (a.indexes?.has(i))
+            continue;
+          if (unevaluatedItems2 === false) {
+            out.push({ path: `${path}/${i}`, keyword: "unevaluatedItems", message: "unexpected item" });
+          } else
+            this.walk(unevaluatedItems2, b, v[i], `${path}/${i}`, out);
+        }
+      }
+    }
+  };
+  var LISTED_VALUES = 20;
+  function listValues(values) {
+    if (values.length <= LISTED_VALUES)
+      return JSON.stringify(values);
+    const listed = JSON.stringify(values.slice(0, LISTED_VALUES));
+    return `${listed.slice(0, -1)}, ... and ${values.length - LISTED_VALUES} more]`;
+  }
+  function containsMessage(min, max) {
+    if (max === Number.POSITIVE_INFINITY)
+      return `expected at least ${min} matching ${min === 1 ? "item" : "items"}`;
+    if (min === 0)
+      return `expected at most ${max} matching ${max === 1 ? "item" : "items"}`;
+    return `expected between ${min} and ${max} matching items`;
+  }
+  function isBound(value) {
+    return typeof value === "number" || typeof value === "bigint";
+  }
+  function pointer(path, key) {
+    return `${path}/${String(key).replace(/~/g, "~0").replace(/\//g, "~1")}`;
+  }
+  function typeName(v) {
+    if (v === null)
+      return "null";
+    if (Array.isArray(v))
+      return "array";
+    if (v instanceof Uint8Array)
+      return "bytes";
+    if (typeof v === "bigint")
+      return "bigint";
+    if (typeof v === "number" && Number.isInteger(v))
+      return "integer";
+    if (typeof v === "number" && !Number.isFinite(v))
+      return String(v);
+    return typeof v;
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/validator.js
+  function compile(schema, options = NO_OPTIONS) {
+    const check = compileCheck(schema, options);
+    return options.coerce === true ? new CoercingValidator(schema, options, check) : new Validator(schema, options, check);
+  }
+  var NO_OPTIONS = Object.freeze({});
+  var Validator = class {
+    /** Whether `value` is valid. A plain function: it may be passed around without its validator. */
+    check;
+    schema;
+    options;
+    explainer = void 0;
+    constructor(schema, options, check) {
+      this.check = check;
+      this.schema = schema;
+      this.options = options;
+    }
+    /**
+     * Why `value` is invalid: one error per failing keyword, `[]` when it is valid. Built on the first failure and
+     * kept, so a validator whose values always pass never pays for it.
+     */
+    errors(value) {
+      if (this.check(value))
+        return [];
+      this.explainer ??= new Explainer(compiler(this.schema, this.options), this.schema);
+      return this.explainer.errors(value);
+    }
+    /**
+     * `value` itself when it is valid, else its errors: check() and errors() in one result, without coercion.
+     *
+     * Not TypeBox's `Value.Parse`, which also clones, fills defaults, converts and strips undeclared properties before
+     * it checks. This only checks: the strict replacement where `Value.Parse` is used to validate (its other steps
+     * change nothing for a valid value of a schema without defaults or extra properties). Use `parse()` with
+     * `coerce: true` for conversion.
+     */
+    validate(value) {
+      return this.check(value) ? { ok: true, value } : { ok: false, errors: this.errors(value) };
+    }
+  };
+  var CoercingValidator = class extends Validator {
+    coercer = void 0;
+    /**
+     * `value` coerced towards the schema: numeric strings to numbers, `"true"` to `true`, a single value to a one-item
+     * array, an optional `null` dropped, the first union branch the value converts to (the README lists every rule).
+     * Only the changed paths are copied; `value` comes back itself when nothing changes, and is never modified. Values
+     * that cannot be coerced stay as they are. The rules are built on the first call.
+     */
+    coerce(value) {
+      this.coercer ??= new Coercer(compiler(this.schema, this.options), this.schema);
+      return this.coercer.coerce(value);
+    }
+    /** Coerces `value`, then checks it: the coerced value when it is valid, else its errors. */
+    parse(value) {
+      return this.validate(this.coerce(value));
+    }
+  };
+  function compileCheck(schema, options) {
+    return compiler(schema, options).root();
+  }
+  function compiler(schema, options) {
+    const plain = new Compiler(schema, options, false);
+    try {
+      plain.root();
+      return plain;
+    } catch (error) {
+      if (error !== RESTART)
+        throw error;
+      return new Compiler(schema, options, true);
+    }
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/date.js
+  var DAYS = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  var DATE = /^(\d\d\d\d)-(\d\d)-(\d\d)$/;
+  function IsLeapYear(year) {
+    return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  }
+  function IsDate(value) {
+    const matches = DATE.exec(value);
+    if (!matches)
+      return false;
+    const year = +matches[1];
+    const month = +matches[2];
+    const day = +matches[3];
+    return month >= 1 && month <= 12 && day >= 1 && day <= (month === 2 && IsLeapYear(year) ? 29 : DAYS[month]);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/time.js
+  var TIME = /^(\d\d):(\d\d):(\d\d)(?:\.\d+)?(?:([Zz])|([+-])(\d\d):(\d\d))?$/;
+  function IsTime(value, strictTimeZone = true) {
+    const matches = TIME.exec(value);
+    if (!matches)
+      return false;
+    if (strictTimeZone && !matches[4] && !matches[5])
+      return false;
+    const hr = +matches[1];
+    const min = +matches[2];
+    const sec = +matches[3];
+    if (hr > 23 || min > 59 || sec > 60)
+      return false;
+    if (matches[5]) {
+      const tzH2 = +matches[6];
+      const tzM2 = +matches[7];
+      if (tzH2 > 23 || tzM2 > 59)
+        return false;
+    }
+    if (sec < 60)
+      return true;
+    const tzSign = matches[5] === "-" ? -1 : 1;
+    const tzH = +(matches[6] || 0);
+    const tzM = +(matches[7] || 0);
+    const totalUtcMin = hr * 60 + min - tzSign * (tzH * 60 + tzM);
+    return (totalUtcMin % 1440 + 1440) % 1440 === 1439;
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/date_time.js
+  function IsDateTime(value) {
+    const dateTime = value.split(/T/i);
+    return dateTime.length === 2 && IsDate(dateTime[0]) && IsTime(dateTime[1]);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/duration.js
+  var Duration = /^P((\d+Y(\d+M(\d+D)?)?|\d+M(\d+D)?|\d+D)(T(\d+H(\d+M(\d+S)?)?|\d+M(\d+S)?|\d+S))?|T(\d+H(\d+M(\d+S)?)?|\d+M(\d+S)?|\d+S)|\d+W)$/;
+  function IsDuration(value) {
+    return Duration.test(value);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/email.js
+  var Email = /^(?:[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*|"(?:[^"\\]|\\[\x20-\x7e])*")@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*|\[(?:IPv6:[a-f0-9:]+|(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3})\])$/i;
+  function IsEmail(value) {
+    return Email.test(value);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/idna/pattern/pattern.js
+  var RE_RULE_HYPHEN_PLACEMENT = new RegExp("^(?!-).*(?<!-)$");
+  var RE_RULE_NOT_RESERVED_ACE = /^(?!..--)/;
+  var RE_ASCII_LDH = /^[a-zA-Z0-9-]*$/;
+  var RE_ASCII = new RegExp("^\\p{ASCII}*$", "u");
+  var RE_NON_ASCII = /[^\p{ASCII}]/u;
+  var RE_ASCII_DIGIT = /[0-9]/;
+  var RE_ARABIC_INDIC_DIGIT = /[\u{0660}-\u{0669}]/u;
+  var RE_EXT_ARABIC_INDIC_DIGIT = /[\u{06f0}-\u{06f9}]/u;
+  var RE_COMMON_SEPARATOR = /[\u{002e}\u{002c}\u{003a}\u{002f}]/u;
+  var RE_EUROPEAN_SEPARATOR = /[\u{002d}\u{002b}]/u;
+  var RE_MARK_NONSPACING = new RegExp("\\p{Mn}", "u");
+  var RE_MARK_SPACING_COMBINING = new RegExp("\\p{Mc}", "u");
+  var RE_MARK_ENCLOSING = new RegExp("\\p{Me}", "u");
+  var RE_COMBINING_MARK = /[\p{Mn}\p{Mc}\p{Me}]/u;
+  var RE_LETTER = new RegExp("\\p{L}", "u");
+  var RE_NUMBER_DECIMAL = new RegExp("\\p{Nd}", "u");
+  var RE_SCRIPT_GREEK = new RegExp("\\p{Script=Greek}", "u");
+  var RE_SCRIPT_HEBREW = new RegExp("\\p{Script=Hebrew}", "u");
+  var RE_SCRIPT_JAPANESE = /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u;
+  var RE_SCRIPT_ARABIC_LETTER = /[\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Mandaic}]/u;
+  var RE_VIRAMA = /[\u{094d}\u{09cd}\u{0a4d}\u{0acd}\u{0b4d}\u{0bcd}\u{0c4d}\u{0ccd}\u{0d3b}\u{0d3c}\u{0d4d}\u{0dca}\u{1b44}\u{1baa}\u{1bab}\u{a9c0}\u{11046}\u{1107f}\u{110b9}\u{11133}\u{11134}\u{111c0}\u{11235}\u{1134d}\u{11442}\u{114c2}\u{115bf}\u{1163f}\u{116b6}\u{11c3f}\u{11d44}\u{11d45}]/u;
+  var RE_RFC5892_DISALLOWED = /[\u{0640}\u{07fa}\u{302e}\u{302f}\u{3031}\u{3032}\u{3033}\u{3034}\u{3035}\u{303b}]/u;
+  var RE_CONTEXTO_EXCEPTIONS = /[\u{00b7}\u{0375}\u{05f3}\u{05f4}\u{200c}\u{200d}\u{30fb}]/u;
+  var RE_PVALID_EXCEPTIONS = /[\u{00df}\u{03c2}\u{06fd}\u{06fe}\u{0f0b}\u{3007}]/u;
+  var RE_EUROPEAN_NUMBER = new RegExp([RE_ASCII_DIGIT, RE_EXT_ARABIC_INDIC_DIGIT].map((regexp) => regexp.source).join("|"), "u");
+  var RE_PERMITTED_CATEGORY = new RegExp([
+    RE_LETTER,
+    RE_EUROPEAN_SEPARATOR,
+    RE_COMMON_SEPARATOR,
+    RE_NUMBER_DECIMAL,
+    RE_MARK_NONSPACING,
+    RE_MARK_SPACING_COMBINING,
+    RE_CONTEXTO_EXCEPTIONS,
+    RE_PVALID_EXCEPTIONS
+  ].map((regexp) => regexp.source).join("|"), "u");
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/idna/label/ascii.js
+  function IsAsciiLabel(value) {
+    return RE_RULE_HYPHEN_PLACEMENT.test(value) && RE_RULE_NOT_RESERVED_ACE.test(value) && RE_ASCII_LDH.test(value);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/idna/format/puny.js
+  var PUNYCODE_BASE = 36;
+  var PUNYCODE_TMIN = 1;
+  var PUNYCODE_TMAX = 26;
+  var PUNYCODE_SKEW = 38;
+  var PUNYCODE_DAMP = 700;
+  var PUNYCODE_INITIAL_BIAS = 72;
+  var PUNYCODE_INITIAL_N = 128;
+  function ThrowDontCare() {
+    throw null;
+  }
+  function IsAcePrefixed(value) {
+    return value.toLowerCase().startsWith("xn--");
+  }
+  function Adapt(delta, numPoints, firstTime) {
+    delta = firstTime ? Math.floor(delta / PUNYCODE_DAMP) : delta >> 1;
+    delta += Math.floor(delta / numPoints);
+    let k = 0;
+    while (delta > (PUNYCODE_BASE - PUNYCODE_TMIN) * PUNYCODE_TMAX >> 1) {
+      delta = Math.floor(delta / (PUNYCODE_BASE - PUNYCODE_TMIN));
+      k += PUNYCODE_BASE;
+    }
+    return k + Math.floor((PUNYCODE_BASE - PUNYCODE_TMIN + 1) * delta / (delta + PUNYCODE_SKEW));
+  }
+  function Decode(value) {
+    const output = [];
+    let n = PUNYCODE_INITIAL_N;
+    let i = 0;
+    let bias = PUNYCODE_INITIAL_BIAS;
+    const delimIdx = value.lastIndexOf("-");
+    if (delimIdx > 0) {
+      for (let j = 0; j < delimIdx; j++) {
+        const cp = value.charCodeAt(j);
+        if (cp >= 128)
+          ThrowDontCare();
+        output.push(cp);
+      }
+    }
+    let inIdx = delimIdx < 0 ? 0 : delimIdx + 1;
+    while (inIdx < value.length) {
+      const oldi = i;
+      let w = 1;
+      let k = PUNYCODE_BASE;
+      while (true) {
+        if (inIdx >= value.length)
+          ThrowDontCare();
+        const ch = value.charCodeAt(inIdx++);
+        let digit;
+        if (ch >= 97 && ch <= 122)
+          digit = ch - 97;
+        else if (ch >= 48 && ch <= 57)
+          digit = ch - 48 + 26;
+        else
+          ThrowDontCare();
+        i += digit * w;
+        const t = k <= bias ? PUNYCODE_TMIN : k >= bias + PUNYCODE_TMAX ? PUNYCODE_TMAX : k - bias;
+        if (digit < t)
+          break;
+        w *= PUNYCODE_BASE - t;
+        k += PUNYCODE_BASE;
+      }
+      const outLen = output.length + 1;
+      bias = Adapt(i - oldi, outLen, oldi === 0);
+      n += Math.floor(i / outLen);
+      i %= outLen;
+      output.splice(i, 0, n);
+      i++;
+    }
+    return String.fromCodePoint(...output);
+  }
+  function DigitToChar(digit) {
+    return digit < 26 ? String.fromCharCode(digit + 97) : String.fromCharCode(digit - 26 + 48);
+  }
+  var RE_REPLACE_NON_ASCII = new RegExp(RE_NON_ASCII.source, "gu");
+  function Encode(input) {
+    const basic = input.replace(RE_REPLACE_NON_ASCII, "");
+    const basicLength = basic.length;
+    const result = basicLength > 0 ? [basic, "-"] : [];
+    const codePoints2 = Array.from(input, (char) => char.codePointAt(0));
+    let n = PUNYCODE_INITIAL_N;
+    let delta = 0;
+    let bias = PUNYCODE_INITIAL_BIAS;
+    let handledCPCount = basicLength;
+    while (handledCPCount < codePoints2.length) {
+      let m = Infinity;
+      for (const cp of codePoints2) {
+        if (cp >= n && cp < m)
+          m = cp;
+      }
+      delta += (m - n) * (handledCPCount + 1);
+      n = m;
+      for (const cp of codePoints2) {
+        if (cp < n)
+          delta++;
+        if (cp === n) {
+          let q = delta;
+          for (let k = PUNYCODE_BASE; ; k += PUNYCODE_BASE) {
+            const t = k <= bias ? PUNYCODE_TMIN : k >= bias + PUNYCODE_TMAX ? PUNYCODE_TMAX : k - bias;
+            if (q < t)
+              break;
+            const digit = t + (q - t) % (PUNYCODE_BASE - t);
+            result.push(DigitToChar(digit));
+            q = Math.floor((q - t) / (PUNYCODE_BASE - t));
+          }
+          result.push(DigitToChar(q));
+          bias = Adapt(delta, handledCPCount + 1, handledCPCount === basicLength);
+          delta = 0;
+          handledCPCount++;
+        }
+      }
+      delta++;
+      n++;
+    }
+    return result.join("");
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/idna/format/bidi.js
+  var RE_RTL_ALLOWED = /^(?:R|AL|AN|EN|ES|CS|ET|ON|BN|NSM)$/;
+  var RE_LTR_ALLOWED = /^(?:L|EN|ES|CS|ET|ON|BN|NSM)$/;
+  var RE_RTL_CLASSES = /^(?:R|AL|AN)$/;
+  function HasBidiChars(value) {
+    if (IsAcePrefixed(value)) {
+      try {
+        return HasRightToLeftCharacters(Decode(value.slice(4).toLowerCase()));
+      } catch {
+        return false;
+      }
+    }
+    return HasRightToLeftCharacters(value);
+  }
+  function GetBidiClass(codePoint) {
+    const char = String.fromCodePoint(codePoint);
+    return RE_EUROPEAN_NUMBER.test(char) ? "EN" : RE_ARABIC_INDIC_DIGIT.test(char) ? "AN" : (
+      // Pattern.RE_EUROPEAN_SEPARATOR.test(char) ? 'ES' : // (no-spec-coverage)
+      // Pattern.RE_COMMON_SEPARATOR.test(char) ? 'CS' : // (no-spec-coverage)
+      RE_MARK_NONSPACING.test(char) ? "NSM" : RE_SCRIPT_HEBREW.test(char) ? "R" : RE_SCRIPT_ARABIC_LETTER.test(char) ? "AL" : RE_LETTER.test(char) ? "L" : "ON"
+    );
+  }
+  function HasRightToLeftCharacters(value) {
+    for (const ch of value)
+      if (RE_RTL_CLASSES.test(GetBidiClass(ch.codePointAt(0))))
+        return true;
+    return false;
+  }
+  function SatisfiesBidiRule(value) {
+    let isRtl = false;
+    let allowed = RE_LTR_ALLOWED;
+    let sawEN = false;
+    let sawAN = false;
+    let isFirst = true;
+    for (const ch of value) {
+      const bidiClass = GetBidiClass(ch.codePointAt(0));
+      if (isFirst) {
+        if (bidiClass !== "L" && bidiClass !== "R" && bidiClass !== "AL")
+          return false;
+        isRtl = bidiClass === "R" || bidiClass === "AL";
+        allowed = isRtl ? RE_RTL_ALLOWED : RE_LTR_ALLOWED;
+        isFirst = false;
+      }
+      if (!allowed.test(bidiClass))
+        return false;
+      if (bidiClass === "EN")
+        sawEN = true;
+      else if (bidiClass === "AN")
+        sawAN = true;
+    }
+    if (isRtl && sawEN && sawAN)
+      return false;
+    return true;
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/idna/label/unicode.js
+  function ExceedsMaxALabelLength(value) {
+    return RE_NON_ASCII.test(value) && Encode(value).length + 4 > 63;
+  }
+  function HasInvalidHyphens(chars) {
+    if (chars[0] === "-" || chars[chars.length - 1] === "-")
+      return true;
+    return chars.slice(2).join("").startsWith("--");
+  }
+  function IsUnicodeLabel(value) {
+    if (ExceedsMaxALabelLength(value))
+      return false;
+    if (HasRightToLeftCharacters(value) && !SatisfiesBidiRule(value))
+      return false;
+    const chars = [...value];
+    const codePoints2 = chars.map((c) => c.codePointAt(0));
+    const length = codePoints2.length;
+    if (HasInvalidHyphens(chars))
+      return false;
+    if (RE_COMBINING_MARK.test(chars[0]))
+      return false;
+    let hasJapanese = false;
+    for (let i = 0; i < length; i++) {
+      const codePoint = codePoints2[i];
+      const char = chars[i];
+      if (RE_RFC5892_DISALLOWED.test(char))
+        return false;
+      if (!RE_PERMITTED_CATEGORY.test(char))
+        return false;
+      if (RE_SCRIPT_JAPANESE.test(char))
+        hasJapanese = true;
+      const prev = codePoints2[i - 1], next = codePoints2[i + 1];
+      switch (codePoint) {
+        case 183:
+          if (prev !== 108 || next !== 108)
+            return false;
+          break;
+        // MIDDLE DOT (Catalan)
+        case 885:
+          if (!next || !RE_SCRIPT_GREEK.test(chars[i + 1]))
+            return false;
+          break;
+        // Greek KERAIA
+        case 1523:
+        case 1524:
+          if (!prev || !RE_SCRIPT_HEBREW.test(chars[i - 1]))
+            return false;
+          break;
+        // Hebrew GERESH
+        case 8204:
+          if (!prev || prev < 128 && !RE_VIRAMA.test(chars[i - 1]))
+            return false;
+          break;
+        case 8205:
+          if (!prev || !RE_VIRAMA.test(chars[i - 1]))
+            return false;
+          break;
+        case 12539:
+          break;
+      }
+    }
+    if (value.includes("\u30FB") && !hasJapanese)
+      return false;
+    return true;
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/idna/label/puny.js
+  function IsPunyLabel(value) {
+    if (!IsAcePrefixed(value))
+      return false;
+    try {
+      const body = value.slice(4).toLowerCase();
+      if (body.lastIndexOf("-") === 0)
+        return false;
+      const decoded = Decode(body);
+      if (!RE_NON_ASCII.test(decoded))
+        return false;
+      return IsUnicodeLabel(decoded);
+    } catch {
+      return false;
+    }
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/idna/hostname.js
+  function IsValidLabelLength(value) {
+    return value.length > 0 && value.length <= 63;
+  }
+  function IsLabel(value) {
+    return IsValidLabelLength(value) && (IsPunyLabel(value) || IsAsciiLabel(value));
+  }
+  function IsHostname(value) {
+    if (value.length === 0 || value.length > 253)
+      return false;
+    if (value.charCodeAt(value.length - 1) === 46)
+      return false;
+    return value.split(".").every((label) => IsLabel(label));
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/idna/idn-hostname.js
+  function IsValidLabelLength2(value) {
+    return value.length > 0 && value.length <= 63;
+  }
+  function IsLabel2(value) {
+    return IsValidLabelLength2(value) && (IsPunyLabel(value) || IsUnicodeLabel(value));
+  }
+  function NormalizeHostname(value) {
+    return value.replace(/[\uff01-\uff5e]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 65248)).normalize("NFC").replace(/[\u00ad\u034f\u180b-\u180d\u200b\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu, "").replace(/[\u002E\u3002\uFF0E\uFF61]/g, ".");
+  }
+  function IsIdnHostname(value) {
+    if (value.length === 0 || value.includes(" "))
+      return false;
+    const normalized = NormalizeHostname(value);
+    if (normalized.length > 253)
+      return false;
+    const labels = normalized.split(".");
+    const hasBidiChars = labels.some((label) => HasBidiChars(label));
+    return labels.every((label) => IsLabel2(label) && (!hasBidiChars || SatisfiesBidiRule(label)));
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/hostname.js
+  function IsHostname2(value) {
+    return IsHostname(value);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/idn_email.js
+  var IdnEmail = new RegExp('^(?:[A-Za-z0-9!#$%&\'*+/=?^_`{|}~\\u{0080}-\\u{10FFFF}-]+(?:\\.[A-Za-z0-9!#$%&\'*+/=?^_`{|}~\\u{0080}-\\u{10FFFF}-]+)*|"(?:[^"\\\\]|\\\\.)*")@[\\p{L}\\p{N}](?:[\\p{L}\\p{N}-]{0,62})(?<!-)(?:\\.[\\p{L}\\p{N}](?:[\\p{L}\\p{N}-]{0,62})(?<!-))*$', "iu");
+  function IsIdnEmail(value) {
+    return IdnEmail.test(value.normalize("NFC"));
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/idn_hostname.js
+  function IsIdnHostname2(value) {
+    return IsIdnHostname(value);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/ipv4.js
+  var IPv4 = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+  function IsIPv4(value) {
+    return IPv4.test(value);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/ipv6.js
+  var IPv6 = /^(?:(?:(?:[0-9a-f]{1,4}:){6}|::(?:[0-9a-f]{1,4}:){5}|(?:[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){4}|(?:(?:[0-9a-f]{1,4}:)?[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){3}|(?:(?:[0-9a-f]{1,4}:){0,2}[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){2}|(?:(?:[0-9a-f]{1,4}:){0,3}[0-9a-f]{1,4})?::[0-9a-f]{1,4}:|(?:(?:[0-9a-f]{1,4}:){0,4}[0-9a-f]{1,4})?::)(?:[0-9a-f]{1,4}:[0-9a-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[0-9a-f]{1,4}:){0,5}[0-9a-f]{1,4})?::[0-9a-f]{1,4}|(?:(?:[0-9a-f]{1,4}:){0,6}[0-9a-f]{1,4})?::)$/i;
+  function IsIPv6(value) {
+    return IPv6.test(value);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/iri.js
+  var IpvFutureMatchMaxLength = 2048;
+  var IpvFutureMatch = /\[[vV][0-9a-fA-F]+\.[^\]]+\]/;
+  var InvalidIriChars = /[\x00-\x20<>^`{|}\\]/;
+  var InvalidPercentEncoding = /%(?![0-9a-fA-F]{2})/;
+  function NarrowIpvFuture(value) {
+    return value.length < IpvFutureMatchMaxLength ? value.replace(IpvFutureMatch, "[::1]") : value;
+  }
+  function IsIri(value) {
+    if (InvalidIriChars.test(value))
+      return false;
+    if (InvalidPercentEncoding.test(value))
+      return false;
+    return URL.canParse(NarrowIpvFuture(value));
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/iri_reference.js
+  var InvalidIriChars2 = /[\x00-\x20\x7F\\]|%(?![0-9a-fA-F]{2})/;
+  var MalformedScheme = /^[a-zA-Z][a-zA-Z0-9+\-.]*\/\//;
+  function IsIriReference(value) {
+    return !InvalidIriChars2.test(value) && !MalformedScheme.test(value) && URL.canParse(value, "http://example.com");
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/json_pointer.js
+  var JsonPointer = /^(?:\/(?:[^~/]|~0|~1)*)*$/;
+  function IsJsonPointer(value) {
+    return JsonPointer.test(value);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/json_pointer_uri_fragment.js
+  var JsonPointerUriFragment = /^#(?:\/(?:[a-z0-9_\-.!$&'()*+,;:=@]|%[0-9a-f]{2}|~0|~1)*)*$/i;
+  function IsJsonPointerUriFragment(value) {
+    return JsonPointerUriFragment.test(value);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/regex.js
+  function IsRegex(value) {
+    try {
+      new RegExp(value, "u");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/relative_json_pointer.js
+  var RelativeJsonPointer = /^(?:0|[1-9][0-9]*)(?:#|(?:\/(?:[^~/]|~0|~1)*)*)$/;
+  function IsRelativeJsonPointer(value) {
+    return RelativeJsonPointer.test(value);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/uri.js
+  var Uri = /^[a-z][a-z0-9+\-.]*:(?:\/\/(?:(?:[-a-z0-9._~!$&'()*+,;=:]|%[0-9a-f]{2})*@)?(?:\[(?:(?:(?:[\da-f]{1,4}:){6}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|::(?:[\da-f]{1,4}:){5}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:[\da-f]{1,4})?::(?:[\da-f]{1,4}:){4}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,1}[\da-f]{1,4})?::(?:[\da-f]{1,4}:){3}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,2}[\da-f]{1,4})?::(?:[\da-f]{1,4}:){2}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,3}[\da-f]{1,4})?::[\da-f]{1,4}:(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,4}[\da-f]{1,4})?::(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,5}[\da-f]{1,4})?::[\da-f]{1,4}|(?:(?:[\da-f]{1,4}:){0,6}[\da-f]{1,4})?::)|v[0-9a-f]+\.[-a-z0-9._~!$&'()*+,;=:]+)\]|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)|(?:[-a-z0-9._~!$&'()*+,;=]|%[0-9a-f]{2})*)(?::\d*)?(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*|\/(?:(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*)?|(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*)?(?:\?(?:[-a-z0-9._~!$&'()*+,;=:@/?]|%[0-9a-f]{2})*)?(?:#(?:[-a-z0-9._~!$&'()*+,;=:@/?]|%[0-9a-f]{2})*)?$/i;
+  function IsUri(value) {
+    return Uri.test(value);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/uri_reference.js
+  var UriReference = /^(?:[a-z][a-z0-9+\-.]*:(?:\/\/(?:(?:[-a-z0-9._~!$&'()*+,;=:]|%[0-9a-f]{2})*@)?(?:\[(?:(?:(?:[\da-f]{1,4}:){6}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|::(?:[\da-f]{1,4}:){5}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:[\da-f]{1,4})?::(?:[\da-f]{1,4}:){4}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,1}[\da-f]{1,4})?::(?:[\da-f]{1,4}:){3}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,2}[\da-f]{1,4})?::(?:[\da-f]{1,4}:){2}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,3}[\da-f]{1,4})?::[\da-f]{1,4}:(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,4}[\da-f]{1,4})?::(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,5}[\da-f]{1,4})?::[\da-f]{1,4}|(?:(?:[\da-f]{1,4}:){0,6}[\da-f]{1,4})?::)|v[0-9a-f]+\.[-a-z0-9._~!$&'()*+,;=:]+)\]|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)|(?:[-a-z0-9._~!$&'()*+,;=]|%[0-9a-f]{2})*)(?::\d*)?(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*|\/(?:(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*)?|(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*)?|(?:\/\/(?:(?:[-a-z0-9._~!$&'()*+,;=:]|%[0-9a-f]{2})*@)?(?:\[(?:(?:(?:[\da-f]{1,4}:){6}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|::(?:[\da-f]{1,4}:){5}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:[\da-f]{1,4})?::(?:[\da-f]{1,4}:){4}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,1}[\da-f]{1,4})?::(?:[\da-f]{1,4}:){3}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,2}[\da-f]{1,4})?::(?:[\da-f]{1,4}:){2}(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,3}[\da-f]{1,4})?::[\da-f]{1,4}:(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,4}[\da-f]{1,4})?::(?:[\da-f]{1,4}:[\da-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))|(?:(?:[\da-f]{1,4}:){0,5}[\da-f]{1,4})?::[\da-f]{1,4}|(?:(?:[\da-f]{1,4}:){0,6}[\da-f]{1,4})?::)|v[0-9a-f]+\.[-a-z0-9._~!$&'()*+,;=:]+)\]|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)|(?:[-a-z0-9._~!$&'()*+,;=]|%[0-9a-f]{2})*)(?::\d*)?(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*|\/(?:(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*)?|(?:[-a-z0-9._~!$&'()*+,;=@]|%[0-9a-f]{2})+(?:\/(?:[-a-z0-9._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*)?)(?:\?(?:[-a-z0-9._~!$&'()*+,;=:@/?]|%[0-9a-f]{2})*)?(?:#(?:[-a-z0-9._~!$&'()*+,;=:@/?]|%[0-9a-f]{2})*)?$/i;
+  function IsUriReference(value) {
+    return UriReference.test(value);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/uri_template.js
+  var UriTemplate = /^(?:(?:[^\x00-\x20"<>%\\^`{|}\x7f]|%[0-9a-f]{2})|\{[+#./;?&=,!@|]?(?:[a-z0-9_]|%[0-9a-f]{2})+(?:\.(?:[a-z0-9_]|%[0-9a-f]{2})+)*(?::[1-9]\d{0,3}|\*)?(?:,(?:[a-z0-9_]|%[0-9a-f]{2})+(?:\.(?:[a-z0-9_]|%[0-9a-f]{2})+)*(?::[1-9]\d{0,3}|\*)?)*\})*$/i;
+  function IsUriTemplate(value) {
+    return UriTemplate.test(value);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/url.js
+  function IsUrl(value) {
+    return URL.canParse(value);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/typebox/uuid.js
+  var Uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+  function IsUuid(value) {
+    return Uuid.test(value);
+  }
+
+  // node_modules/@earendil-works/pi-schema/dist/formats/index.js
+  var formats = Object.freeze({
+    date: IsDate,
+    "date-time": IsDateTime,
+    duration: IsDuration,
+    email: IsEmail,
+    hostname: IsHostname2,
+    "idn-email": IsIdnEmail,
+    "idn-hostname": IsIdnHostname2,
+    ipv4: IsIPv4,
+    ipv6: IsIPv6,
+    iri: IsIri,
+    "iri-reference": IsIriReference,
+    "json-pointer": IsJsonPointer,
+    "json-pointer-uri-fragment": IsJsonPointerUriFragment,
+    regex: IsRegex,
+    "relative-json-pointer": IsRelativeJsonPointer,
+    time: IsTime,
+    uri: IsUri,
+    "uri-reference": IsUriReference,
+    "uri-template": IsUriTemplate,
+    url: IsUrl,
+    uuid: IsUuid
+  });
+
+  // node_modules/@earendil-works/pi-ai/dist/utils/validation.js
+  var validatorCache = /* @__PURE__ */ new WeakMap();
+  function getValidator(schema) {
+    const cached = validatorCache.get(schema);
+    if (cached) {
+      return cached;
+    }
+    const validator = compile(schema, { formats, coerce: true, unresolvedRefs: "reject" });
+    validatorCache.set(schema, validator);
+    return validator;
+  }
+  function formatValidationPath(pointer2) {
+    if (pointer2 === "")
+      return "root";
+    return pointer2.slice(1).split("/").map((segment) => segment.replace(/~1/g, "/").replace(/~0/g, "~")).join(".");
+  }
+  function validateToolArguments(tool, toolCall) {
+    if (toolCall.argumentsError) {
+      throw new Error(`Invalid arguments for tool "${toolCall.name}": ${toolCall.argumentsError}`);
+    }
+    const result = getValidator(tool.parameters).parse(structuredClone(toolCall.arguments));
+    if (result.ok) {
+      return result.value;
+    }
+    const errors = result.errors.map((error) => `  - ${formatValidationPath(error.path)}: ${error.message}`).join("\n");
+    const errorMessage = `Validation failed for tool "${toolCall.name}":
+${errors}
+
+Received arguments:
+${JSON.stringify(toolCall.arguments, null, 2)}`;
+    throw new Error(errorMessage);
+  }
+
+  // node_modules/@earendil-works/pi-agent-core/dist/stream-fn.js
+  var defaultStreamFn;
+  function getDefaultStreamFn() {
+    if (!defaultStreamFn) {
+      throw new Error("No default stream function configured. Pass streamFn explicitly or call setDefaultStreamFn().");
+    }
+    return defaultStreamFn;
+  }
+
+  // node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js
+  var DEFAULT_AGENT_IDENTITY = { attribution: PI_ATTRIBUTION };
+  async function runAgentLoop(prompts, context, config, emit, signal, streamFn) {
+    const initialMessages = declareToolChanges(context, prompts);
+    const newMessages = [...initialMessages];
+    const currentContext = {
+      ...context,
+      messages: [...context.messages, ...initialMessages]
+    };
+    await emit({ type: "agent_start" });
+    await emit({ type: "turn_start" });
+    for (const message of initialMessages) {
+      await emit({ type: "message_start", message });
+      await emit({ type: "message_end", message });
+    }
+    await runLoop(currentContext, newMessages, config, signal, emit, streamFn ?? getDefaultStreamFn());
+    return newMessages;
+  }
+  async function runAgentLoopContinue(context, config, emit, signal, streamFn) {
+    if (context.messages.length === 0) {
+      throw new Error("Cannot continue: no messages in context");
+    }
+    if (context.messages[context.messages.length - 1].role === "assistant") {
+      throw new Error("Cannot continue from message role: assistant");
+    }
+    const newMessages = [];
+    const currentContext = { ...context };
+    await emit({ type: "agent_start" });
+    await emit({ type: "turn_start" });
+    await runLoop(currentContext, newMessages, config, signal, emit, streamFn ?? getDefaultStreamFn());
+    return newMessages;
+  }
+  async function runLoop(initialContext, newMessages, initialConfig, signal, emit, streamFunction) {
+    let currentContext = initialContext;
+    let config = initialConfig;
+    let lastCompletedTurn;
+    let explicitContinuation = false;
+    let pendingMessages = await config.getSteeringMessages?.() || [];
+    while (true) {
+      let hasMoreToolCalls = true;
+      while (hasMoreToolCalls || pendingMessages.length > 0) {
+        let preparedMessages = [];
+        if (lastCompletedTurn) {
+          const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
+          if (nextTurnSnapshot) {
+            currentContext = nextTurnSnapshot.context ?? currentContext;
+            preparedMessages = nextTurnSnapshot.messages ?? [];
+            config = {
+              ...config,
+              model: nextTurnSnapshot.model ?? config.model,
+              reasoning: nextTurnSnapshot.thinkingLevel === void 0 ? config.reasoning : nextTurnSnapshot.thinkingLevel === "off" ? void 0 : nextTurnSnapshot.thinkingLevel
+            };
+          }
+          if (pendingMessages.length === 0) {
+            pendingMessages = await config.getSteeringMessages?.() || [];
+          }
+          await emit({ type: "turn_start" });
+        }
+        for (const message2 of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {
+          await emit({ type: "message_start", message: message2 });
+          await emit({ type: "message_end", message: message2 });
+          currentContext.messages.push(message2);
+          newMessages.push(message2);
+        }
+        pendingMessages = [];
+        const requestUpdate = await config.prepareRequest?.({
+          context: currentContext,
+          model: config.model,
+          thinkingLevel: config.reasoning ?? "off"
+        }, signal);
+        if (requestUpdate) {
+          currentContext = requestUpdate.context ?? currentContext;
+          config = {
+            ...config,
+            model: requestUpdate.model ?? config.model,
+            reasoning: requestUpdate.thinkingLevel === void 0 ? config.reasoning : requestUpdate.thinkingLevel === "off" ? void 0 : requestUpdate.thinkingLevel
+          };
+        }
+        const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFunction);
+        newMessages.push(message);
+        if (message.stopReason === "error" || message.stopReason === "aborted") {
+          lastCompletedTurn = {
+            message,
+            toolResults: [],
+            context: currentContext,
+            newMessages
+          };
+          await config.finishTurn?.(lastCompletedTurn, signal);
+          await emit({ type: "turn_end", message, toolResults: [] });
+          await emit({ type: "agent_end", messages: newMessages });
+          return;
+        }
+        const toolCalls2 = message.content.filter((c) => c.type === "toolCall");
+        const toolResults = [];
+        hasMoreToolCalls = false;
+        if (toolCalls2.length > 0) {
+          const executedToolBatch = message.stopReason === "length" ? await failToolCallsFromTruncatedMessage(toolCalls2, emit) : await executeToolCalls(currentContext, message, config, signal, emit);
+          toolResults.push(...executedToolBatch.messages);
+          hasMoreToolCalls = !executedToolBatch.terminate;
+          for (const result of toolResults) {
+            currentContext.messages.push(result);
+            newMessages.push(result);
+          }
+        }
+        lastCompletedTurn = {
+          message,
+          toolResults,
+          context: currentContext,
+          newMessages
+        };
+        const decision = await config.finishTurn?.(lastCompletedTurn, signal);
+        await emit({ type: "turn_end", message, toolResults });
+        if (decision?.action === "end") {
+          await emit({ type: "agent_end", messages: newMessages });
+          return;
+        }
+        explicitContinuation = decision?.action === "continue";
+        pendingMessages = await config.getSteeringMessages?.() || [];
+        if (hasMoreToolCalls || pendingMessages.length > 0) {
+          explicitContinuation = false;
+        }
+      }
+      const followUpMessages = await config.getFollowUpMessages?.() || [];
+      if (followUpMessages.length > 0) {
+        explicitContinuation = false;
+        pendingMessages = followUpMessages;
+        continue;
+      }
+      if (explicitContinuation) {
+        explicitContinuation = false;
+        continue;
+      }
+      break;
+    }
+    await emit({ type: "agent_end", messages: newMessages });
+  }
+  function declareToolChanges(context, pendingMessages) {
+    let systemIndex = -1;
+    for (let i = pendingMessages.length - 1; i >= 0; i--) {
+      if (pendingMessages[i].role === "system") {
+        systemIndex = i;
+        break;
+      }
+    }
+    const pending = pendingMessages[systemIndex];
+    const baseline = pending ? pendingMessages.map((message, index2) => index2 === systemIndex ? withToolChanges(pending, NO_CHANGES) : message) : pendingMessages;
+    const changes = getToolStateChanges(getCurrentTools([...context.messages, ...baseline]), (context.tools ?? []).map(toToolDeclaration));
+    const unchanged = changes.toolsAdded.length === 0 && changes.toolsRemoved.length === 0;
+    if (pending) {
+      if (unchanged && !pending.toolsAdded?.length && !pending.toolsRemoved?.length)
+        return pendingMessages;
+      return baseline.map((message, index2) => index2 === systemIndex ? withToolChanges(pending, changes) : message);
+    }
+    if (unchanged)
+      return pendingMessages;
+    const update = withToolChanges({ role: "system", content: "", timestamp: Date.now() }, changes);
+    const insertIndex = pendingMessages.findIndex((message) => message.role !== "system");
+    const index = insertIndex === -1 ? pendingMessages.length : insertIndex;
+    return [...pendingMessages.slice(0, index), update, ...pendingMessages.slice(index)];
+  }
+  var NO_CHANGES = { toolsAdded: [], toolsRemoved: [] };
+  function withToolChanges(message, { toolsAdded, toolsRemoved }) {
+    const { toolsAdded: _added, toolsRemoved: _removed, ...rest } = message;
+    return {
+      ...rest,
+      ...toolsAdded.length > 0 ? { toolsAdded } : {},
+      ...toolsRemoved.length > 0 ? { toolsRemoved } : {}
+    };
+  }
+  async function streamAssistantResponse(context, config, signal, emit, streamFunction) {
+    let messages = context.messages;
+    if (config.transformContext) {
+      messages = await config.transformContext(messages, signal);
+    }
+    const llmMessages = await config.convertToLlm(messages);
+    const llmContext = normalizeContext({ messages: llmMessages });
+    const resolvedApiKey = (config.getApiKey ? await config.getApiKey(config.model.provider) : void 0) || config.apiKey;
+    const response = await streamFunction(config.model, llmContext, {
+      ...config,
+      apiKey: resolvedApiKey,
+      identity: mergeClientIdentity(DEFAULT_AGENT_IDENTITY, config.identity),
+      signal
+    });
+    const result = async () => Object.assign(await response.result(), { thinkingLevel: config.reasoning ?? "off" });
+    let partialMessage = null;
+    let addedPartial = false;
+    for await (const event of response) {
+      switch (event.type) {
+        case "start":
+          partialMessage = event.partial;
+          context.messages.push(partialMessage);
+          addedPartial = true;
+          await emit({ type: "message_start", message: { ...partialMessage } });
+          break;
+        case "text_start":
+        case "text_delta":
+        case "text_end":
+        case "thinking_start":
+        case "thinking_delta":
+        case "thinking_end":
+        case "toolcall_start":
+        case "toolcall_delta":
+        case "toolcall_end":
+          if (partialMessage) {
+            partialMessage = event.partial;
+            context.messages[context.messages.length - 1] = partialMessage;
+            await emit({
+              type: "message_update",
+              assistantMessageEvent: event,
+              message: { ...partialMessage }
+            });
+          }
+          break;
+        case "done":
+        case "error": {
+          const finalMessage2 = await result();
+          if (addedPartial) {
+            context.messages[context.messages.length - 1] = finalMessage2;
+          } else {
+            context.messages.push(finalMessage2);
+          }
+          if (!addedPartial) {
+            await emit({ type: "message_start", message: { ...finalMessage2 } });
+          }
+          await emit({ type: "message_end", message: finalMessage2 });
+          return finalMessage2;
+        }
+      }
+    }
+    const finalMessage = await result();
+    if (addedPartial) {
+      context.messages[context.messages.length - 1] = finalMessage;
+    } else {
+      context.messages.push(finalMessage);
+      await emit({ type: "message_start", message: { ...finalMessage } });
+    }
+    await emit({ type: "message_end", message: finalMessage });
+    return finalMessage;
+  }
+  async function failToolCallsFromTruncatedMessage(toolCalls2, emit) {
+    const messages = [];
+    for (const toolCall of toolCalls2) {
+      await emit({
+        type: "tool_execution_start",
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        args: toolCall.arguments
+      });
+      const finalized = {
+        toolCall,
+        result: createErrorToolResult(`Tool call "${toolCall.name}" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.`),
+        isError: true
+      };
+      await emitToolExecutionEnd(finalized, emit);
+      const toolResultMessage = createToolResultMessage(finalized);
+      await emitToolResultMessage(toolResultMessage, emit);
+      messages.push(toolResultMessage);
+    }
+    return { messages, terminate: false };
+  }
+  async function executeToolCalls(currentContext, assistantMessage, config, signal, emit) {
+    const toolCalls2 = assistantMessage.content.filter((c) => c.type === "toolCall");
+    const hasSequentialToolCall = toolCalls2.some((tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential");
+    if (config.toolExecution === "sequential" || hasSequentialToolCall) {
+      return executeToolCallsSequential(currentContext, assistantMessage, toolCalls2, config, signal, emit);
+    }
+    return executeToolCallsParallel(currentContext, assistantMessage, toolCalls2, config, signal, emit);
+  }
+  async function executeToolCallsSequential(currentContext, assistantMessage, toolCalls2, config, signal, emit) {
+    const finalizedCalls = [];
+    const messages = [];
+    for (const toolCall of toolCalls2) {
+      await emit({
+        type: "tool_execution_start",
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        args: toolCall.arguments
+      });
+      const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
+      let finalized;
+      if (preparation.kind === "immediate") {
+        finalized = {
+          toolCall,
+          result: preparation.result,
+          isError: preparation.isError
+        };
+      } else {
+        const executed = await executePreparedToolCall(preparation, signal, emitToolExecutionUpdate(toolCall, emit));
+        finalized = await finalizeExecutedToolCall(currentContext, assistantMessage, preparation, executed, config, signal);
+      }
+      await emitToolExecutionEnd(finalized, emit);
+      const toolResultMessage = createToolResultMessage(finalized);
+      await emitToolResultMessage(toolResultMessage, emit);
+      finalizedCalls.push(finalized);
+      messages.push(toolResultMessage);
+      if (signal?.aborted) {
+        break;
+      }
+    }
+    return {
+      messages,
+      terminate: shouldTerminateToolBatch(finalizedCalls)
+    };
+  }
+  async function executeToolCallsParallel(currentContext, assistantMessage, toolCalls2, config, signal, emit) {
+    const finalizedCalls = [];
+    for (const toolCall of toolCalls2) {
+      await emit({
+        type: "tool_execution_start",
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        args: toolCall.arguments
+      });
+      const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
+      if (preparation.kind === "immediate") {
+        const finalized = {
+          toolCall,
+          result: preparation.result,
+          isError: preparation.isError
+        };
+        await emitToolExecutionEnd(finalized, emit);
+        finalizedCalls.push(finalized);
+        if (signal?.aborted) {
+          break;
+        }
+        continue;
+      }
+      finalizedCalls.push(async () => {
+        if (signal?.aborted) {
+          const finalized2 = {
+            toolCall,
+            result: createErrorToolResult("Operation aborted"),
+            isError: true
+          };
+          await emitToolExecutionEnd(finalized2, emit);
+          return finalized2;
+        }
+        const executed = await executePreparedToolCall(preparation, signal, emitToolExecutionUpdate(toolCall, emit));
+        const finalized = await finalizeExecutedToolCall(currentContext, assistantMessage, preparation, executed, config, signal);
+        await emitToolExecutionEnd(finalized, emit);
+        return finalized;
+      });
+      if (signal?.aborted) {
+        break;
+      }
+    }
+    const orderedFinalizedCalls = await Promise.all(finalizedCalls.map((entry) => typeof entry === "function" ? entry() : Promise.resolve(entry)));
+    const messages = [];
+    for (const finalized of orderedFinalizedCalls) {
+      const toolResultMessage = createToolResultMessage(finalized);
+      await emitToolResultMessage(toolResultMessage, emit);
+      messages.push(toolResultMessage);
+    }
+    return {
+      messages,
+      terminate: shouldTerminateToolBatch(orderedFinalizedCalls)
+    };
+  }
+  function shouldTerminateToolBatch(finalizedCalls) {
+    return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
+  }
+  function prepareToolCallArguments(tool, toolCall) {
+    if (!tool.prepareArguments) {
+      return toolCall;
+    }
+    const preparedArguments = tool.prepareArguments(toolCall.arguments);
+    if (preparedArguments === toolCall.arguments) {
+      return toolCall;
+    }
+    return {
+      ...toolCall,
+      arguments: preparedArguments
+    };
+  }
+  async function prepareToolCall(currentContext, assistantMessage, toolCall, config, signal, tools = currentContext.tools ?? []) {
+    const tool = tools.find((t) => t.name === toolCall.name);
+    if (!tool) {
+      return {
+        kind: "immediate",
+        result: createErrorToolResult(`Tool ${toolCall.name} not found`),
+        isError: true
+      };
+    }
+    try {
+      const preparedToolCall = prepareToolCallArguments(tool, toolCall);
+      const validatedArgs = validateToolArguments(tool, preparedToolCall);
+      if (config.beforeToolCall) {
+        const beforeResult = await config.beforeToolCall({
+          assistantMessage,
+          toolCall,
+          args: validatedArgs,
+          context: currentContext
+        }, signal);
+        if (signal?.aborted) {
+          return {
+            kind: "immediate",
+            result: createErrorToolResult("Operation aborted"),
+            isError: true
+          };
+        }
+        if (beforeResult?.block) {
+          const result = createErrorToolResult(beforeResult.reason || "Tool execution was blocked");
+          if (beforeResult.terminate === true) {
+            result.terminate = true;
+          }
+          return {
+            kind: "immediate",
+            result,
+            isError: true
+          };
+        }
+      }
+      if (signal?.aborted) {
+        return {
+          kind: "immediate",
+          result: createErrorToolResult("Operation aborted"),
+          isError: true
+        };
+      }
+      return {
+        kind: "prepared",
+        toolCall,
+        tool,
+        args: validatedArgs
+      };
+    } catch (error) {
+      return {
+        kind: "immediate",
+        result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+        isError: true
+      };
+    }
+  }
+  function emitToolExecutionUpdate(toolCall, emit) {
+    return (partialResult) => emit({
+      type: "tool_execution_update",
+      toolCallId: toolCall.id,
+      toolName: toolCall.name,
+      args: toolCall.arguments,
+      partialResult
+    });
+  }
+  async function executePreparedToolCall(prepared, signal, onUpdate) {
+    const updateEvents = [];
+    let acceptingUpdates = true;
+    const startedAt = performance.now();
+    const elapsed = () => Math.round(performance.now() - startedAt);
+    try {
+      const result = await prepared.tool.execute(prepared.toolCall.id, prepared.args, signal, (partialResult) => {
+        if (!acceptingUpdates)
+          return;
+        updateEvents.push(Promise.resolve(onUpdate(partialResult)));
+      });
+      const durationMs = elapsed();
+      acceptingUpdates = false;
+      await Promise.all(updateEvents);
+      return { result, isError: result.isError === true, durationMs };
+    } catch (error) {
+      const durationMs = elapsed();
+      acceptingUpdates = false;
+      await Promise.all(updateEvents);
+      return {
+        result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+        isError: true,
+        durationMs
+      };
+    } finally {
+      acceptingUpdates = false;
+    }
+  }
+  async function finalizeExecutedToolCall(currentContext, assistantMessage, prepared, executed, config, signal) {
+    let result = executed.result;
+    let isError = executed.isError;
+    if (config.afterToolCall) {
+      try {
+        const afterResult = await config.afterToolCall({
+          assistantMessage,
+          toolCall: prepared.toolCall,
+          args: prepared.args,
+          result,
+          isError,
+          context: currentContext
+        }, signal);
+        if (afterResult) {
+          const structuredContent = afterResult.structuredContent ?? (afterResult.content ? void 0 : result.structuredContent);
+          result = {
+            ...result,
+            content: afterResult.content ?? result.content,
+            details: afterResult.details ?? result.details,
+            usage: afterResult.usage ?? result.usage,
+            terminate: afterResult.terminate ?? result.terminate
+          };
+          if (structuredContent === void 0)
+            delete result.structuredContent;
+          else
+            result.structuredContent = structuredContent;
+          isError = afterResult.isError ?? isError;
+        }
+      } catch (error) {
+        result = createErrorToolResult(error instanceof Error ? error.message : String(error));
+        isError = true;
+      }
+    }
+    return {
+      toolCall: prepared.toolCall,
+      result,
+      isError,
+      durationMs: executed.durationMs
+    };
+  }
+  function createErrorToolResult(message) {
+    return {
+      content: [{ type: "text", text: message }],
+      details: {}
+    };
+  }
+  async function emitToolExecutionEnd(finalized, emit) {
+    await emit({
+      type: "tool_execution_end",
+      toolCallId: finalized.toolCall.id,
+      toolName: finalized.toolCall.name,
+      result: finalized.result,
+      isError: finalized.isError,
+      ...finalized.durationMs === void 0 ? {} : { durationMs: finalized.durationMs }
+    });
+  }
+  function createToolResultMessage(finalized) {
+    return {
+      role: "toolResult",
+      toolCallId: finalized.toolCall.id,
+      toolName: finalized.toolCall.name,
+      // Untyped tools (JS extensions) can return results without content; normalize
+      // so the null never enters session history or provider payloads.
+      content: finalized.result.content ?? [],
+      details: finalized.result.details,
+      usage: finalized.result.usage,
+      isError: finalized.isError,
+      ...finalized.durationMs === void 0 ? {} : { durationMs: finalized.durationMs },
+      timestamp: Date.now()
+    };
+  }
+  async function emitToolResultMessage(toolResultMessage, emit) {
+    await emit({ type: "message_start", message: toolResultMessage });
+    await emit({ type: "message_end", message: toolResultMessage });
+  }
+
+  // node_modules/@earendil-works/pi-agent-core/dist/agent.js
+  function defaultConvertToLlm(messages) {
+    return messages.filter((message) => message.role === "system" || message.role === "user" || message.role === "assistant" || message.role === "toolResult");
+  }
+  var EMPTY_USAGE = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+  };
+  var DEFAULT_MODEL = {
+    id: "unknown",
+    name: "unknown",
+    api: "unknown",
+    provider: "unknown",
+    baseUrl: "",
+    reasoning: false,
+    input: [],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 0,
+    maxTokens: 0
+  };
+  function createMutableAgentState(initialState) {
+    let tools = initialState?.tools?.slice() ?? [];
+    let messages = initialState?.messages?.slice() ?? [];
+    const initialMessage = createInitialSystemMessage(initialState?.systemPrompt, tools.map(toToolDeclaration));
+    if (messages[0]?.role !== "system" && initialMessage)
+      messages.unshift(initialMessage);
+    return {
+      get systemPrompt() {
+        return getCurrentSystemPrompt(messages);
+      },
+      model: initialState?.model ?? DEFAULT_MODEL,
+      thinkingLevel: initialState?.thinkingLevel ?? "off",
+      get tools() {
+        return tools;
+      },
+      set tools(nextTools) {
+        tools = nextTools.slice();
+      },
+      get messages() {
+        return messages;
+      },
+      set messages(nextMessages) {
+        messages = nextMessages.slice();
+      },
+      isStreaming: false,
+      streamingMessage: void 0,
+      pendingToolCalls: /* @__PURE__ */ new Set(),
+      errorMessage: void 0
+    };
+  }
+  var PendingMessageQueue = class {
+    messages = [];
+    mode;
+    constructor(mode) {
+      this.mode = mode;
+    }
+    enqueue(message) {
+      this.messages.push(message);
+    }
+    hasItems() {
+      return this.messages.length > 0;
+    }
+    peek() {
+      if (this.mode === "all")
+        return this.messages.slice();
+      const first = this.messages[0];
+      return first ? [first] : [];
+    }
+    drain() {
+      const drained = this.peek();
+      this.messages = this.messages.slice(drained.length);
+      return drained;
+    }
+    clear() {
+      this.messages = [];
+    }
+  };
+  var Agent = class {
+    _state;
+    listeners = /* @__PURE__ */ new Set();
+    steeringQueue;
+    followUpQueue;
+    convertToLlm;
+    transformContext;
+    streamFunction;
+    getApiKey;
+    onPayload;
+    onResponse;
+    onProviderStreamEvent;
+    beforeToolCall;
+    afterToolCall;
+    finishTurn;
+    prepareRequest;
+    prepareNextTurn;
+    prepareNextTurnWithContext;
+    activeRun;
+    /** Session identifier forwarded to providers for cache-aware backends. */
+    sessionId;
+    /** Optional per-level thinking token budgets forwarded to the stream function. */
+    thinkingBudgets;
+    /** Preferred transport forwarded to the stream function. */
+    transport;
+    /** Optional cap for provider-requested retry delays. */
+    maxRetryDelayMs;
+    /** Tool execution strategy for assistant messages that contain multiple tool calls. */
+    toolExecution;
+    /** Request identity forwarded to the stream function, over `DEFAULT_AGENT_IDENTITY`. */
+    identity;
+    constructor(options) {
+      const runtimeOptions = options ?? {};
+      this._state = createMutableAgentState(runtimeOptions.initialState);
+      this.convertToLlm = runtimeOptions.convertToLlm ?? defaultConvertToLlm;
+      this.transformContext = runtimeOptions.transformContext;
+      this.streamFunction = runtimeOptions.streamFn ?? getDefaultStreamFn();
+      this.getApiKey = runtimeOptions.getApiKey;
+      this.onPayload = runtimeOptions.onPayload;
+      this.onResponse = runtimeOptions.onResponse;
+      this.onProviderStreamEvent = runtimeOptions.onProviderStreamEvent;
+      this.beforeToolCall = runtimeOptions.beforeToolCall;
+      this.afterToolCall = runtimeOptions.afterToolCall;
+      this.finishTurn = runtimeOptions.finishTurn;
+      this.prepareRequest = runtimeOptions.prepareRequest;
+      this.prepareNextTurn = runtimeOptions.prepareNextTurn;
+      this.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext;
+      this.steeringQueue = new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time");
+      this.followUpQueue = new PendingMessageQueue(runtimeOptions.followUpMode ?? "one-at-a-time");
+      this.sessionId = runtimeOptions.sessionId;
+      this.thinkingBudgets = runtimeOptions.thinkingBudgets;
+      this.transport = runtimeOptions.transport ?? "auto";
+      this.maxRetryDelayMs = runtimeOptions.maxRetryDelayMs;
+      this.toolExecution = runtimeOptions.toolExecution ?? "parallel";
+      this.identity = runtimeOptions.identity;
+    }
+    /**
+     * Subscribe to agent lifecycle events.
+     *
+     * Listener promises are awaited in subscription order and are included in
+     * the current run's settlement. Listeners also receive the active abort
+     * signal for the current run.
+     *
+     * `agent_end` is the final emitted event for a run, but the agent does not
+     * become idle until all awaited listeners for that event have settled.
+     */
+    subscribe(listener) {
+      this.listeners.add(listener);
+      return () => this.listeners.delete(listener);
+    }
+    /**
+     * Current agent state.
+     *
+     * Assigning `state.tools` or `state.messages` copies the provided top-level array.
+     */
+    get state() {
+      return this._state;
+    }
+    /** Controls how queued steering messages are drained. */
+    set steeringMode(mode) {
+      this.steeringQueue.mode = mode;
+    }
+    get steeringMode() {
+      return this.steeringQueue.mode;
+    }
+    /** Controls how queued follow-up messages are drained. */
+    set followUpMode(mode) {
+      this.followUpQueue.mode = mode;
+    }
+    get followUpMode() {
+      return this.followUpQueue.mode;
+    }
+    /** Queue a message to be injected after the current assistant turn finishes. */
+    steer(message) {
+      this.steeringQueue.enqueue(message);
+    }
+    /** Queue a message to run only after the agent would otherwise stop. */
+    followUp(message) {
+      this.followUpQueue.enqueue(message);
+    }
+    /** Remove all queued steering messages. */
+    clearSteeringQueue() {
+      this.steeringQueue.clear();
+    }
+    /** Remove all queued follow-up messages. */
+    clearFollowUpQueue() {
+      this.followUpQueue.clear();
+    }
+    /** Remove all queued steering and follow-up messages. */
+    clearAllQueues() {
+      this.clearSteeringQueue();
+      this.clearFollowUpQueue();
+    }
+    /** Returns true when either queue still contains pending messages. */
+    hasQueuedMessages() {
+      return this.steeringQueue.hasItems() || this.followUpQueue.hasItems();
+    }
+    /** Preview the messages selected for the next turn without consuming them. */
+    peekQueuedMessages() {
+      const steering = this.steeringQueue.peek();
+      return steering.length > 0 ? steering : this.followUpQueue.peek();
+    }
+    /** Active abort signal for the current run, if any. */
+    get signal() {
+      return this.activeRun?.abortController.signal;
+    }
+    /** Abort the current run, if one is active. */
+    abort() {
+      this.activeRun?.abortController.abort();
+    }
+    /**
+     * Resolve when the current run and all awaited event listeners have finished.
+     *
+     * This resolves after `agent_end` listeners settle.
+     */
+    waitForIdle() {
+      return this.activeRun?.promise ?? Promise.resolve();
+    }
+    /** Clear conversation state and queues while retaining the replayed prompt/tool baseline. */
+    reset() {
+      if (this.activeRun) {
+        throw new Error("Agent is already processing. Wait for completion before resetting.");
+      }
+      const baseline = getCurrentSystemMessage(this._state.messages);
+      this._state.messages = baseline ? [baseline] : [];
+      this._state.isStreaming = false;
+      this._state.streamingMessage = void 0;
+      this._state.pendingToolCalls = /* @__PURE__ */ new Set();
+      this._state.errorMessage = void 0;
+      this.clearFollowUpQueue();
+      this.clearSteeringQueue();
+    }
+    async prompt(input, images) {
+      if (this.activeRun) {
+        throw new Error("Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.");
+      }
+      const messages = this.normalizePromptInput(input, images);
+      await this.runPromptMessages(messages);
+    }
+    /** Continue from the current transcript. The last message must be a user or tool-result message. */
+    async continue() {
+      if (this.activeRun) {
+        throw new Error("Agent is already processing. Wait for completion before continuing.");
+      }
+      const lastMessage = this._state.messages[this._state.messages.length - 1];
+      if (!lastMessage || this._state.messages.every((message) => message.role === "system")) {
+        throw new Error("No messages to continue from");
+      }
+      if (lastMessage.role === "assistant") {
+        const queuedSteering = this.steeringQueue.drain();
+        if (queuedSteering.length > 0) {
+          await this.runPromptMessages(queuedSteering, { skipInitialSteeringPoll: true });
+          return;
+        }
+        const queuedFollowUps = this.followUpQueue.drain();
+        if (queuedFollowUps.length > 0) {
+          await this.runPromptMessages(queuedFollowUps);
+          return;
+        }
+        throw new Error("Cannot continue from message role: assistant");
+      }
+      await this.runContinuation();
+    }
+    normalizePromptInput(input, images) {
+      if (Array.isArray(input)) {
+        return input;
+      }
+      if (typeof input !== "string") {
+        return [input];
+      }
+      const content = [{ type: "text", text: input }];
+      if (images && images.length > 0) {
+        content.push(...images);
+      }
+      return [{ role: "user", content, timestamp: Date.now() }];
+    }
+    async runPromptMessages(messages, options = {}) {
+      await this.runWithLifecycle(async (signal) => {
+        await runAgentLoop(messages, this.createContextSnapshot(), this.createLoopConfig(options), (event) => this.processEvents(event), signal, this.streamFunction);
+      });
+    }
+    async runContinuation() {
+      await this.runWithLifecycle(async (signal) => {
+        await runAgentLoopContinue(this.createContextSnapshot(), this.createLoopConfig(), (event) => this.processEvents(event), signal, this.streamFunction);
+      });
+    }
+    createContextSnapshot() {
+      return {
+        messages: this._state.messages.slice(),
+        tools: this._state.tools.slice()
+      };
+    }
+    createLoopConfig(options = {}) {
+      let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
+      return {
+        model: this._state.model,
+        reasoning: this._state.thinkingLevel === "off" ? void 0 : this._state.thinkingLevel,
+        sessionId: this.sessionId,
+        onPayload: this.onPayload,
+        onResponse: this.onResponse,
+        onProviderStreamEvent: this.onProviderStreamEvent,
+        transport: this.transport,
+        thinkingBudgets: this.thinkingBudgets,
+        maxRetryDelayMs: this.maxRetryDelayMs,
+        identity: this.identity,
+        toolExecution: this.toolExecution,
+        beforeToolCall: this.beforeToolCall,
+        afterToolCall: this.afterToolCall,
+        finishTurn: this.finishTurn,
+        prepareRequest: this.prepareRequest,
+        prepareNextTurn: this.prepareNextTurnWithContext || this.prepareNextTurn ? async (context) => {
+          if (this.prepareNextTurnWithContext) {
+            return await this.prepareNextTurnWithContext(context, this.signal);
+          }
+          return await this.prepareNextTurn?.(this.signal);
+        } : void 0,
+        convertToLlm: this.convertToLlm,
+        transformContext: this.transformContext,
+        getApiKey: this.getApiKey,
+        getSteeringMessages: async () => {
+          if (skipInitialSteeringPoll) {
+            skipInitialSteeringPoll = false;
+            return [];
+          }
+          return this.steeringQueue.drain();
+        },
+        getFollowUpMessages: async () => this.followUpQueue.drain()
+      };
+    }
+    async runWithLifecycle(executor) {
+      if (this.activeRun) {
+        throw new Error("Agent is already processing.");
+      }
+      const abortController = new AbortController();
+      let resolvePromise = () => {
+      };
+      const promise = new Promise((resolve) => {
+        resolvePromise = resolve;
+      });
+      this.activeRun = { promise, resolve: resolvePromise, abortController };
+      this._state.isStreaming = true;
+      this._state.streamingMessage = void 0;
+      this._state.errorMessage = void 0;
+      try {
+        await executor(abortController.signal);
+      } catch (error) {
+        await this.handleRunFailure(error, abortController.signal.aborted);
+      } finally {
+        this.finishRun();
+      }
+    }
+    async handleRunFailure(error, aborted) {
+      const failureMessage = {
+        role: "assistant",
+        content: [{ type: "text", text: "" }],
+        api: this._state.model.api,
+        provider: this._state.model.provider,
+        model: this._state.model.id,
+        usage: EMPTY_USAGE,
+        stopReason: aborted ? "aborted" : "error",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        timestamp: Date.now()
+      };
+      await this.processEvents({ type: "message_start", message: failureMessage });
+      await this.processEvents({ type: "message_end", message: failureMessage });
+      await this.processEvents({ type: "turn_end", message: failureMessage, toolResults: [] });
+      await this.processEvents({ type: "agent_end", messages: [failureMessage] });
+    }
+    finishRun() {
+      this._state.isStreaming = false;
+      this._state.streamingMessage = void 0;
+      this._state.pendingToolCalls = /* @__PURE__ */ new Set();
+      this.activeRun?.resolve();
+      this.activeRun = void 0;
+    }
+    /**
+     * Reduce internal state for a loop event, then await listeners.
+     *
+     * `agent_end` only means no further loop events will be emitted. The run is
+     * considered idle later, after all awaited listeners for `agent_end` finish
+     * and `finishRun()` clears runtime-owned state.
+     */
+    async processEvents(event) {
+      switch (event.type) {
+        case "message_start":
+          this._state.streamingMessage = event.message;
+          break;
+        case "message_update":
+          this._state.streamingMessage = event.message;
+          break;
+        case "message_end":
+          this._state.streamingMessage = void 0;
+          this._state.messages.push(event.message);
+          break;
+        case "tool_execution_start": {
+          const pendingToolCalls = new Set(this._state.pendingToolCalls);
+          pendingToolCalls.add(event.toolCallId);
+          this._state.pendingToolCalls = pendingToolCalls;
+          break;
+        }
+        case "tool_execution_end": {
+          const pendingToolCalls = new Set(this._state.pendingToolCalls);
+          pendingToolCalls.delete(event.toolCallId);
+          this._state.pendingToolCalls = pendingToolCalls;
+          break;
+        }
+        case "turn_end":
+          if (event.message.role === "assistant" && event.message.errorMessage) {
+            this._state.errorMessage = event.message.errorMessage;
+          }
+          break;
+        case "agent_end":
+          this._state.streamingMessage = void 0;
+          break;
+      }
+      const signal = this.activeRun?.abortController.signal;
+      if (!signal) {
+        throw new Error("Agent listener invoked outside active run");
+      }
+      for (const listener of this.listeners) {
+        await listener(event, signal);
+      }
+    }
+  };
+
+  // host.js
+  var g = globalThis;
+  if (typeof g.performance === "undefined") g.performance = { now: () => Date.now() };
+  if (typeof g.structuredClone === "undefined") g.structuredClone = (v) => v === void 0 ? void 0 : JSON.parse(JSON.stringify(v));
+  if (typeof g.AbortController === "undefined") {
+    class AbortSignal {
+      constructor() {
+        this.aborted = false;
+        this.reason = void 0;
+        this.onabort = null;
+        this._listeners = [];
+      }
+      addEventListener(type, fn) {
+        if (type === "abort") this._listeners.push(fn);
+      }
+      removeEventListener(type, fn) {
+        this._listeners = this._listeners.filter((l) => l !== fn);
+      }
+      throwIfAborted() {
+        if (this.aborted) throw this.reason;
+      }
+    }
+    class AbortController2 {
+      constructor() {
+        this.signal = new AbortSignal();
+      }
+      abort(reason) {
+        const s = this.signal;
+        if (s.aborted) return;
+        s.aborted = true;
+        s.reason = reason ?? new Error("aborted");
+        const event = { type: "abort", target: s };
+        if (typeof s.onabort === "function") s.onabort(event);
+        for (const l of s._listeners.slice()) l(event);
+      }
+    }
+    g.AbortSignal = AbortSignal;
+    g.AbortController = AbortController2;
+  }
+  var FILE_MARK = /⟦file:([^⟧]+)⟧/g;
+  var requests = /* @__PURE__ */ new Map();
+  var toolCalls = /* @__PURE__ */ new Map();
+  var runs = /* @__PURE__ */ new Map();
+  var counter = 0;
+  function emptyUsage() {
+    return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+  }
+  function textOf(content) {
+    if (typeof content === "string") return content;
+    return (content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+  }
+  function toWire(messages) {
+    const wire = [{ role: "system", content: getCurrentSystemPrompt(messages) }];
+    for (const m of messages) {
+      if (m.role === "user") {
+        const blocks = [];
+        let text = textOf(m.content);
+        const ids = [];
+        text = text.replace(FILE_MARK, (_, id) => {
+          ids.push(id);
+          return "";
+        });
+        for (const id of ids) blocks.push({ type: "file", file_id: id });
+        if (Array.isArray(m.content)) {
+          for (const b of m.content) {
+            if (b.type === "image") blocks.push({ type: "image_url", image_url: { url: `data:${b.mimeType};base64,${b.data}` } });
+          }
+        }
+        if (blocks.length === 0) {
+          wire.push({ role: "user", content: text });
+        } else {
+          blocks.push({ type: "text", text: text.trim() || "\u770B\u770B\u8FD9\u4E2A\u3002" });
+          wire.push({ role: "user", content: blocks });
+        }
+      } else if (m.role === "assistant") {
+        if (m.stopReason === "error" || m.stopReason === "aborted") continue;
+        const out = { role: "assistant", content: m.content.filter((b) => b.type === "text").map((b) => b.text).join("") };
+        const thinking = m.content.filter((b) => b.type === "thinking");
+        if (thinking.length > 0) out.reasoning_content = thinking.map((b) => b.thinking).join("");
+        const calls = m.content.filter((b) => b.type === "toolCall");
+        if (calls.length > 0) {
+          out.tool_calls = calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: JSON.stringify(c.arguments ?? {}) } }));
+        }
+        wire.push(out);
+      } else if (m.role === "toolResult") {
+        wire.push({ role: "tool", tool_call_id: m.toolCallId, content: textOf(m.content) || "\uFF08\u7A7A\uFF09" });
+      }
+    }
+    return wire;
+  }
+  function makeStreamFn(config) {
+    return (model, context, options) => {
+      const stream = createAssistantMessageEventStream();
+      const output = {
+        role: "assistant",
+        content: [],
+        api: "openai-completions",
+        provider: model.provider,
+        model: model.id,
+        usage: emptyUsage(),
+        stopReason: "stop",
+        timestamp: Date.now()
+      };
+      const requestId = `q${++counter}`;
+      const tools = getCurrentTools(context.messages);
+      const body = { model: model.id, messages: toWire(context.messages), stream: true, temperature: config.temperature ?? 0.2 };
+      if (config.thinking === true || config.thinking === false) body.thinking = { type: config.thinking ? "enabled" : "disabled" };
+      if (tools.length > 0) {
+        body.tools = tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
+        body.tool_choice = "auto";
+      }
+      let textIndex = -1;
+      let thinkingIndex = -1;
+      const pending = /* @__PURE__ */ new Map();
+      let finished = false;
+      const closeText = () => {
+        if (textIndex >= 0) {
+          stream.push({ type: "text_end", contentIndex: textIndex, content: output.content[textIndex].text, partial: output });
+          textIndex = -1;
+        }
+      };
+      const closeThinking = () => {
+        if (thinkingIndex >= 0) {
+          stream.push({ type: "thinking_end", contentIndex: thinkingIndex, content: output.content[thinkingIndex].thinking, partial: output });
+          thinkingIndex = -1;
+        }
+      };
+      const fail = (reason, message) => {
+        if (finished) return;
+        finished = true;
+        requests.delete(requestId);
+        output.stopReason = reason;
+        output.errorMessage = message;
+        stream.push({ type: "error", reason, error: output });
+        stream.end();
+      };
+      requests.set(requestId, {
+        chunk(payload) {
+          if (finished) return;
+          let obj;
+          try {
+            obj = JSON.parse(payload);
+          } catch {
+            return;
+          }
+          if (obj.usage) {
+            output.usage.input = obj.usage.prompt_tokens ?? 0;
+            output.usage.output = obj.usage.completion_tokens ?? 0;
+            output.usage.totalTokens = obj.usage.total_tokens ?? 0;
+          }
+          const delta = obj.choices?.[0]?.delta;
+          if (!delta) return;
+          if (typeof delta.reasoning_content === "string") {
+            if (thinkingIndex < 0) {
+              output.content.push({ type: "thinking", thinking: "" });
+              thinkingIndex = output.content.length - 1;
+              stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
+            }
+            if (delta.reasoning_content) {
+              output.content[thinkingIndex].thinking += delta.reasoning_content;
+              stream.push({ type: "thinking_delta", contentIndex: thinkingIndex, delta: delta.reasoning_content, partial: output });
+            }
+          }
+          if (typeof delta.content === "string" && delta.content) {
+            closeThinking();
+            if (textIndex < 0) {
+              output.content.push({ type: "text", text: "" });
+              textIndex = output.content.length - 1;
+              stream.push({ type: "text_start", contentIndex: textIndex, partial: output });
+            }
+            output.content[textIndex].text += delta.content;
+            stream.push({ type: "text_delta", contentIndex: textIndex, delta: delta.content, partial: output });
+          }
+          for (const call of delta.tool_calls ?? []) {
+            const index = call.index ?? 0;
+            const slot = pending.get(index) ?? { id: "", name: "", args: "" };
+            if (call.id) slot.id = call.id;
+            if (call.function?.name) slot.name = call.function.name;
+            if (typeof call.function?.arguments === "string") slot.args += call.function.arguments;
+            pending.set(index, slot);
+          }
+        },
+        end(error) {
+          if (finished) return;
+          if (error) {
+            fail(options?.signal?.aborted ? "aborted" : "error", error);
+            return;
+          }
+          closeThinking();
+          closeText();
+          const indexes = [...pending.keys()].sort((a, b) => a - b);
+          for (const index of indexes) {
+            const slot = pending.get(index);
+            if (!slot.name) continue;
+            const toolCall = { type: "toolCall", id: slot.id || `call_${requestId}_${index}`, name: slot.name, arguments: {} };
+            try {
+              const parsed = slot.args.trim() ? JSON.parse(slot.args) : {};
+              if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) toolCall.arguments = parsed;
+              else toolCall.argumentsError = `\u5DE5\u5177\u53C2\u6570\u4E0D\u662F JSON \u5BF9\u8C61\uFF1A${slot.args.slice(0, 200)}`;
+            } catch {
+              toolCall.argumentsError = `\u5DE5\u5177\u53C2\u6570\u4E0D\u662F\u5408\u6CD5\u7684 JSON\uFF1A${slot.args.slice(0, 200)}`;
+            }
+            output.content.push(toolCall);
+            const contentIndex = output.content.length - 1;
+            stream.push({ type: "toolcall_start", contentIndex, partial: output });
+            stream.push({ type: "toolcall_delta", contentIndex, delta: slot.args, partial: output });
+            stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
+          }
+          if (output.content.every((b) => b.type === "thinking")) {
+            fail("error", "\u6A21\u578B\u6CA1\u6709\u8FD4\u56DE\u5185\u5BB9\u3002");
+            return;
+          }
+          finished = true;
+          requests.delete(requestId);
+          output.stopReason = output.content.some((b) => b.type === "toolCall") ? "toolUse" : "stop";
+          stream.push({ type: "done", reason: output.stopReason, message: output });
+          stream.end();
+        }
+      });
+      options?.signal?.addEventListener("abort", () => {
+        if (finished) return;
+        g.__pi_cancel(requestId);
+        fail("aborted", "\u5DF2\u505C\u4E0B");
+      });
+      stream.push({ type: "start", partial: output });
+      if (options?.signal?.aborted) {
+        fail("aborted", "\u5DF2\u505C\u4E0B");
+        return stream;
+      }
+      g.__pi_chat(requestId, JSON.stringify(body));
+      return stream;
+    };
+  }
+  function makeTools(runId, specs) {
+    return specs.map((spec) => ({
+      name: spec.name,
+      label: spec.name,
+      description: spec.description,
+      parameters: spec.parameters,
+      executionMode: "sequential",
+      execute(toolCallId, params) {
+        return new Promise((resolve) => {
+          const callId = `${runId}:${toolCallId}:${++counter}`;
+          toolCalls.set(callId, (resultJSON) => {
+            let r = {};
+            try {
+              r = JSON.parse(resultJSON);
+            } catch {
+            }
+            resolve({ content: [{ type: "text", text: String(r.content ?? "") }], details: null, isError: r.isError === true, terminate: r.terminate === true });
+          });
+          g.__pi_tool(callId, spec.name, JSON.stringify(params ?? {}));
+        });
+      }
+    }));
+  }
+  function historyMessage(h, model) {
+    if (h.role === "user") {
+      let text = h.text || "";
+      for (const id of h.fileIDs || []) text += `\u27E6file:${id}\u27E7`;
+      return { role: "user", content: text, timestamp: Date.now() };
+    }
+    return {
+      role: "assistant",
+      content: [{ type: "text", text: h.text || "" }],
+      api: "openai-completions",
+      provider: model.provider,
+      model: model.id,
+      usage: emptyUsage(),
+      stopReason: "stop",
+      timestamp: Date.now()
+    };
+  }
+  var Pi = {
+    version: "pi-agent-core 1.5.2",
+    /** 开始一次运行。config: {system, model, thinking, temperature, maxTurns, tools, history, prompt:{text, images, fileIDs}} */
+    start(runId, configJSON) {
+      const config = JSON.parse(configJSON);
+      const send = (event) => g.__pi_event(runId, JSON.stringify(event));
+      const model = {
+        id: config.model,
+        name: config.model,
+        api: "openai-completions",
+        provider: config.provider || "deepseek",
+        baseUrl: "",
+        input: ["text", "image"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        reasoning: config.thinking !== false
+      };
+      let turns = 0;
+      const maxTurns = config.maxTurns ?? 200;
+      const agent = new Agent({
+        initialState: {
+          systemPrompt: config.system,
+          model,
+          thinkingLevel: "off",
+          tools: makeTools(runId, config.tools || []),
+          messages: (config.history || []).map((h) => historyMessage(h, model))
+        },
+        streamFn: makeStreamFn(config),
+        toolExecution: "sequential",
+        identity: null,
+        finishTurn: async () => turns >= maxTurns ? { action: "end" } : void 0
+      });
+      runs.set(runId, agent);
+      let outOfTurns = false;
+      agent.subscribe((event) => {
+        switch (event.type) {
+          case "turn_start":
+            turns += 1;
+            send({ type: "turn_start", turn: turns });
+            break;
+          case "message_update": {
+            if (event.assistantMessageEvent.type === "text_delta") {
+              const text2 = event.message.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+              send({ type: "text", text: text2 });
+            }
+            break;
+          }
+          case "message_end":
+            if (event.message.role === "assistant") {
+              const text2 = event.message.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+              const calls = event.message.content.filter((b) => b.type === "toolCall").length;
+              send({ type: "assistant", text: text2, toolCalls: calls });
+            }
+            break;
+          case "tool_execution_start":
+            send({ type: "tool_start", name: event.toolName });
+            break;
+          case "tool_execution_end":
+            send({ type: "tool_end", name: event.toolName, isError: event.isError === true });
+            break;
+          case "turn_end":
+            if (turns >= maxTurns && event.toolResults.length > 0) outOfTurns = true;
+            break;
+        }
+      });
+      let text = config.prompt?.text || "";
+      for (const id of config.prompt?.fileIDs || []) text += `\u27E6file:${id}\u27E7`;
+      const images = (config.prompt?.images || []).map((data) => ({ type: "image", data, mimeType: "image/jpeg" }));
+      agent.prompt(text, images.length > 0 ? images : void 0).then(() => {
+        const last = [...agent.state.messages].reverse().find((m) => m.role === "assistant");
+        const reason = last?.stopReason === "aborted" ? "aborted" : agent.state.errorMessage ? "error" : outOfTurns ? "max_turns" : "stop";
+        send({ type: "end", reason, error: agent.state.errorMessage || "" });
+      }).catch((error) => {
+        send({ type: "end", reason: "error", error: String(error?.message ?? error) });
+      }).finally(() => runs.delete(runId));
+    },
+    abort(runId) {
+      runs.get(runId)?.abort();
+    },
+    chunk(requestId, payload) {
+      requests.get(requestId)?.chunk(payload);
+    },
+    chatEnd(requestId, error) {
+      requests.get(requestId)?.end(error || "");
+    },
+    toolDone(callId, resultJSON) {
+      const done = toolCalls.get(callId);
+      toolCalls.delete(callId);
+      if (done) done(resultJSON);
+    }
+  };
+  g.Pi = Pi;
+})();

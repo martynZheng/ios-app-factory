@@ -72,11 +72,11 @@ final class Proactive {
                                    parameters: ["type": "object", "properties": [String: Any]()]) { _ in
                 ToolResult(content: "好。", terminate: true)
             })
-            let agent = Agent(systemPrompt: await assistant.systemPrompt(proactive: true), tools: tools, model: try Cloud.model(thinking: false))
-            agent.maxTurns = 6
+            let system = await assistant.systemPrompt(proactive: true)
             let sent = ChatStore.shared.messages.filter { $0.proactive && Calendar.current.isDateInToday($0.time) }.map { "- \($0.text)" }
             let already = sent.isEmpty ? "今天还没有提醒过我。" : "今天已经提醒过：\n" + sent.joined(separator: "\n")
-            try await agent.prompt("你被唤醒了（原因：\(reason)）。\(already)\n看看现在有没有值得提醒我的事。")
+            _ = try await Brain.run(system: system, tools: tools, thinking: false,
+                                    prompt: "你被唤醒了（原因：\(reason)）。\(already)\n看看现在有没有值得提醒我的事。", maxTurns: 6)
             if let (title, body) = out, !title.isEmpty {
                 d.set(d.integer(forKey: "proactiveCount") + 1, forKey: "proactiveCount")
                 _ = await Pusher.now(title: title, body: body)
@@ -138,11 +138,10 @@ final class Proactive {
             每条一两句话：发生了什么、为什么跟我有关；把来源用 Markdown 链接嵌在句子里。口语一点，像朋友发消息，不要标题党，不要凑数。
             写好后调用 push；实在没有新东西就调用 skip。不要重复之前推过的内容。这一轮不要调用 remember、suggest_replies。
             """
-            let agent = Agent(systemPrompt: system, tools: tools, model: try Cloud.model(thinking: false))
-            agent.maxTurns = 8
+
             let earlier = ChatStore.shared.messages.suffix(60).filter { $0.proactive }.suffix(4).map { "- " + String($0.text.prefix(160)) }
             let already = earlier.isEmpty ? "之前还没有推过。" : "最近推过：\n" + earlier.joined(separator: "\n")
-            try await agent.prompt("到推送时间了。\(already)")
+            _ = try await Brain.run(system: system, tools: tools, thinking: false, prompt: "到推送时间了。\(already)", maxTurns: 8)
             if let (title, body) = out, !body.isEmpty {
                 var message = ChatMessage(role: .assistant, text: title.isEmpty ? body : "**\(title)**\n\n\(body)")
                 message.proactive = true

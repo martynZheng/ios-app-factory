@@ -33,6 +33,13 @@ enum Cloud {
         return m
     }
 
+    /// 对话接口的完整地址。
+    static var chatURL: URL? {
+        let b = base
+        guard let url = URL(string: b.hasSuffix("/") ? b + "chat/completions" : b + "/chat/completions"), url.scheme == "https" else { return nil }
+        return url
+    }
+
     /// 服务根地址（去掉结尾的 /v1）。
     private static var root: String {
         var b = base

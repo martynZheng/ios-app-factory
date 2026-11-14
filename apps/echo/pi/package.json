@@ -1,0 +1,16 @@
+{
+  "name": "echo-pi-host",
+  "private": true,
+  "type": "module",
+  "description": "Bundles the Pi agent core (earendil-works/pi, MIT) with a small host bridge so it runs inside the iOS app's JavaScriptCore.",
+  "scripts": {
+    "build": "esbuild host.js --bundle --format=iife --platform=neutral --main-fields=module,main --target=safari16 --legal-comments=none --outfile=../App/Resources/pi-agent.jsbundle",
+    "test": "node test.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "1.5.2"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}

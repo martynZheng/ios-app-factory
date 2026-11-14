@@ -90,3 +90,4 @@ Sync      outbox 落盘 + transferFile  ──▶  Store        JSON 库 + 音�
 - 密钥只在 App 里填（钥匙串），不进仓库。
 - **画图**：`draw_chart` 工具（`ChartCard.swift`，Swift Charts）。模型给横轴标签和 1–4 条数据，可左右双轴；右轴数据换算到左轴范围里画。数据必须是查到的真实数字。
 - **分条回复**：模型用单独一行的 `---` 把回答分成几条；每一轮（包括调用工具前说的话）都落成独立气泡，排队用打字动效放出来（`Assistant.reveal`）。图、确认卡片、来源、快捷选项挂在最后一条上。
+- **智能体内核是原版 Pi**：`@earendil-works/pi-agent-core` 打包成 `App/Resources/pi-agent.jsbundle`（约 175 KB，见 `pi/NOTICE.md`），由系统的 JavaScriptCore 运行；`Agent/PiRuntime.swift` 是宿主（发流式请求、执行原生工具、转发事件），`pi/host.js` 是桥接层。对话和主动推送都走它（`Brain.run`）；加载失败时退回 `PiAgent.swift` 里的 Swift 移植版。录音整理（`DigestAgent`）仍用 Swift 版。
