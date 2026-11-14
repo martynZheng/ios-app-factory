@@ -82,11 +82,11 @@ struct ChatView: View {
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
-            .overlay(alignment: .bottomTrailing) {
-                JumpButtons(showTop: false, showBottom: !bottomVisible && !chat.messages.isEmpty, onTop: {},
-                            onBottom: { withAnimation(.smooth(duration: 0.4)) { proxy.scrollTo("bottom", anchor: .bottom) } })
-                    .padding(.trailing, 16)
-                    .padding(.bottom, 10)
+            .overlay(alignment: .bottom) {
+                ScrollPill(title: "回到最新", symbol: "arrow.down", show: !bottomVisible && !chat.messages.isEmpty) {
+                    withAnimation(.snappy(duration: 0.4)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                }
+                .padding(.bottom, 10)
             }
             .onChange(of: chat.messages.count) { _, _ in
                 withAnimation(.smooth(duration: 0.4)) { proxy.scrollTo("bottom", anchor: .bottom) }

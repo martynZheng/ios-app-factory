@@ -401,17 +401,31 @@ final class DigestCoordinator: ObservableObject {
         fillSettings(day: day)
     }
 
-    /// 给还没有情境标签的章节补上“地点 · 状态”（来自传感器，不是模型）。
-    func fillSettings(day: String) {
+    /// 旧版本把开车路过的地方也当成“在那里”，写进了章节的情境标签。升级后把最近 14 天的重算一遍（只做一次）。
+    func refreshSettingsOnce() {
+        let d = UserDefaults.standard
+        guard !Store.isDemo, !d.bool(forKey: "settingsV2") else { return }
+        d.set(true, forKey: "settingsV2")
+        for i in 0..<14 {
+            fillSettings(day: Store.dayKey(Date().addingTimeInterval(-Double(i) * 86_400)), all: true)
+        }
+    }
+
+    /// 给还没有情境标签的章节补上“地点 · 状态”（来自传感器，不是模型）。all = 全部重算。
+    func fillSettings(day: String, all: Bool = false) {
         Task { @MainActor in
             guard let chapters = Store.shared.db.digests[day]?.chapters else { return }
             var labels: [UUID: String] = [:]
-            for c in chapters where c.setting == nil {
+            for c in chapters where c.setting == nil || all {
                 if let label = await ContextSensor.shared.setting(from: c.start, to: c.end) { labels[c.id] = label }
             }
-            guard !labels.isEmpty, var digest = Store.shared.db.digests[day] else { return }
+            guard !labels.isEmpty || all, var digest = Store.shared.db.digests[day] else { return }
             for i in (digest.chapters ?? []).indices {
-                if let label = labels[digest.chapters![i].id] { digest.chapters![i].setting = label }
+                if let label = labels[digest.chapters![i].id] {
+                    digest.chapters![i].setting = label
+                } else if all {
+                    digest.chapters![i].setting = nil
+                }
             }
             Store.shared.setDigest(digest)
         }

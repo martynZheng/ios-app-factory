@@ -40,6 +40,19 @@ struct PlaceVisit: Codable, Identifiable {
     var lat: Double
     var lon: Double
     var name: String?
+    /// visit：系统的到访检测（可信）；fix：显著位置变化的一个定位点（开车路过也会有）。旧数据没有这一项。
+    var source: String? = nil
+}
+
+/// 一次真正的停留：在同一处待了足够久，而且这段时间不是在车上（堵车、等红灯不算）。
+struct Stay: Identifiable {
+    var id: UUID
+    var start: Date
+    var end: Date
+    var lat: Double
+    var lon: Double
+    var name: String?
+    var minutes: Int { max(1, Int(end.timeIntervalSince(start) / 60)) }
 }
 
 /// 时间线上的一小段情境。
@@ -148,7 +161,7 @@ final class ContextSensor: NSObject, ObservableObject, CLLocationManagerDelegate
                 self.visits[i].depart = depart
             } else {
                 self.visits.append(PlaceVisit(id: UUID(), arrive: arrive, depart: depart,
-                                              lat: visit.coordinate.latitude, lon: visit.coordinate.longitude, name: nil))
+                                              lat: visit.coordinate.latitude, lon: visit.coordinate.longitude, name: nil, source: "visit"))
             }
             self.save()
             self.nameMissingPlaces()
@@ -169,7 +182,7 @@ final class ContextSensor: NSObject, ObservableObject, CLLocationManagerDelegate
                 self.visits[i].depart = fix.timestamp
             }
             self.visits.append(PlaceVisit(id: UUID(), arrive: fix.timestamp, depart: nil,
-                                          lat: fix.coordinate.latitude, lon: fix.coordinate.longitude, name: nil))
+                                          lat: fix.coordinate.latitude, lon: fix.coordinate.longitude, name: nil, source: "fix"))
             self.save()
             self.nameMissingPlaces()
         }
@@ -181,9 +194,15 @@ final class ContextSensor: NSObject, ObservableObject, CLLocationManagerDelegate
         CLLocation(latitude: v.lat, longitude: v.lon).distance(from: CLLocation(latitude: c.latitude, longitude: c.longitude)) < 250
     }
 
-    /// 逐个把坐标翻译成地名（系统地理编码有频率限制，一次一个）。
+    /// 逐个把坐标翻译成地名（系统地理编码有频率限制，一次一个）。只给像是停留的点起名，开车路过的点不浪费次数。
     private func nameMissingPlaces() {
-        guard !geocoding, let i = visits.lastIndex(where: { $0.name == nil }) else { return }
+        let now = Date()
+        guard !geocoding, let i = visits.lastIndex(where: { v in
+            guard v.name == nil else { return false }
+            if v.source == "visit" { return true }
+            let end = v.depart ?? now
+            return end.timeIntervalSince(v.arrive) >= 5 * 60
+        }) else { return }
         // 附近已经有名字的地点直接沿用
         let target = visits[i]
         if let known = visits.first(where: { $0.name != nil && near($0, CLLocationCoordinate2D(latitude: target.lat, longitude: target.lon)) }) {
@@ -219,16 +238,79 @@ final class ContextSensor: NSObject, ObservableObject, CLLocationManagerDelegate
 
     // MARK: 查询
 
-    /// 某一时刻在哪。
-    func place(at time: Date) -> String? {
-        if Store.isDemo { return Demo.spans().last(where: { $0.start <= time })?.place }
-        guard let v = visits.last(where: { $0.arrive <= time.addingTimeInterval(60) }) else { return nil }
-        if let depart = v.depart, time.timeIntervalSince(depart) > 30 * 60 { return nil }
-        if v.depart == nil, time.timeIntervalSince(v.arrive) > 12 * 3600 { return nil }
-        return v.name
+    // MARK: 停留：把“路过”和“去过”分开
+
+    private static func distance(_ a: PlaceVisit, _ lat: Double, _ lon: Double) -> CLLocationDistance {
+        CLLocation(latitude: a.lat, longitude: a.lon).distance(from: CLLocation(latitude: lat, longitude: lon))
     }
 
-    /// 一段时间里依次去过的地方（相邻重复的合并）。
+    /// 只看位置的判断（不需要运动权限，同步可用）：
+    /// 相邻、相距 250 米以内的点并成一处；系统到访检测给的停留 ≥ 5 分钟算数，单个定位点要待满 15 分钟才算
+    /// （开车时显著位置变化每隔几分钟报一个点，每个点只“待”到下一个点出现为止）。
+    func candidateStays(from: Date, to: Date) -> [Stay] {
+        let now = Date()
+        let list = visits.filter { ($0.depart ?? now) > from.addingTimeInterval(-6 * 3600) && $0.arrive < to }.sorted { $0.arrive < $1.arrive }
+        var groups: [[PlaceVisit]] = []
+        for v in list {
+            if let first = groups.last?.first, Self.distance(first, v.lat, v.lon) < 250 {
+                groups[groups.count - 1].append(v)
+            } else {
+                groups.append([v])
+            }
+        }
+        var stays: [Stay] = []
+        for (i, g) in groups.enumerated() {
+            guard let first = g.first else { continue }
+            let nextArrive = i + 1 < groups.count ? groups[i + 1].first?.arrive : nil
+            var end = g.compactMap { $0.depart }.max() ?? nextArrive ?? now
+            if let nextArrive { end = min(end, nextArrive) }
+            end = min(end, first.arrive.addingTimeInterval(16 * 3600))
+            let dwell = end.timeIntervalSince(first.arrive)
+            let trusted = g.contains { $0.source == "visit" }
+            guard dwell >= (trusted ? 5 * 60 : 15 * 60) else { continue }
+            guard end > from, first.arrive < to else { continue }
+            stays.append(Stay(id: first.id, start: first.arrive, end: end, lat: first.lat, lon: first.lon,
+                              name: g.compactMap { $0.name }.first))
+        }
+        return stays
+    }
+
+    /// 再用运动数据排除：这段时间一大半在车上（堵车、等红灯、停车场排队），就不算停留。
+    func stays(from: Date, to: Date) async -> [Stay] {
+        if Store.isDemo {
+            return Demo.spans().filter { $0.activity == .still && $0.end > from && $0.start < to }
+                .map { Stay(id: UUID(), start: $0.start, end: $0.end, lat: 30.129, lon: 120.0838, name: $0.place) }
+        }
+        let candidates = candidateStays(from: from, to: to)
+        guard Self.motionOn, !candidates.isEmpty else { return candidates }
+        let acts = await activities(from: candidates.first!.start, to: candidates.last!.end)
+        guard !acts.isEmpty else { return candidates }
+        return candidates.filter { s in
+            let total = s.end.timeIntervalSince(s.start)
+            var driving: TimeInterval = 0
+            for (a, b, k) in acts where k == .driving {
+                let overlap = min(b, s.end).timeIntervalSince(max(a, s.start))
+                if overlap > 0 { driving += overlap }
+            }
+            return driving / max(total, 1) < 0.5
+        }
+    }
+
+    /// 一段时间里的全部定位点（画路线用，包括路过的）。
+    func track(from: Date, to: Date) -> [CLLocationCoordinate2D] {
+        visits.filter { $0.arrive >= from && $0.arrive < to }.sorted { $0.arrive < $1.arrive }
+            .map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+    }
+
+    /// 某一时刻在哪（只算停留的地方；路过的不算）。
+    func place(at time: Date) -> String? {
+        if Store.isDemo { return Demo.spans().last(where: { $0.start <= time })?.place }
+        let stays = candidateStays(from: time.addingTimeInterval(-60), to: time.addingTimeInterval(60))
+        guard let s = stays.last(where: { $0.start <= time.addingTimeInterval(60) && $0.end >= time.addingTimeInterval(-10 * 60) }) else { return nil }
+        return s.name
+    }
+
+    /// 一段时间里依次停留过的地方（相邻重复的合并）。
     func places(from: Date, to: Date) -> [(Date, String)] {
         if Store.isDemo {
             let list: [(Date, String)] = Demo.spans().filter { $0.end > from && $0.start < to }.compactMap { s in
@@ -237,12 +319,21 @@ final class ContextSensor: NSObject, ObservableObject, CLLocationManagerDelegate
             }
             return dedupe(list)
         }
-        var out: [(Date, String)] = []
-        if let p = place(at: from) { out.append((from, p)) }
-        for v in visits where v.arrive > from && v.arrive < to {
-            if let name = v.name { out.append((v.arrive, name)) }
+        let list = candidateStays(from: from, to: to).compactMap { s -> (Date, String)? in
+            guard let name = s.name else { return nil }
+            return (max(s.start, from), name)
         }
-        return dedupe(out)
+        return dedupe(list)
+    }
+
+    /// 同上，但排除了在车上的“停留”。
+    func confirmedPlaces(from: Date, to: Date) async -> [(Date, String)] {
+        if Store.isDemo { return places(from: from, to: to) }
+        let list = await stays(from: from, to: to).compactMap { s -> (Date, String)? in
+            guard let name = s.name else { return nil }
+            return (max(s.start, from), name)
+        }
+        return dedupe(list)
     }
 
     /// 运动状态，合并成段，去掉 1 分钟以内的抖动。
@@ -288,7 +379,7 @@ final class ContextSensor: NSObject, ObservableObject, CLLocationManagerDelegate
         let t = DateFormatter()
         t.dateFormat = "HH:mm"
         var rows: [String] = []
-        for (start, name) in places(from: from, to: to) { rows.append("\(t.string(from: start)) 位置：\(name)") }
+        for (start, name) in await confirmedPlaces(from: from, to: to) { rows.append("\(t.string(from: start)) 位置：\(name)") }
         for (a, b, act) in await activities(from: from, to: to) {
             rows.append("\(t.string(from: a))–\(t.string(from: b)) 状态：\(act.label)")
         }
@@ -301,7 +392,7 @@ final class ContextSensor: NSObject, ObservableObject, CLLocationManagerDelegate
     /// 一章的情境标签：主要地点 · 主要状态。
     func setting(from: Date, to: Date) async -> String? {
         let end = max(to, from.addingTimeInterval(60))
-        let place = places(from: from, to: end).last?.1
+        let place = await confirmedPlaces(from: from, to: end).last?.1
         let acts = await activities(from: from, to: end)
         var dur: [Activity: TimeInterval] = [:]
         for (a, b, k) in acts { dur[k, default: 0] += min(b, end).timeIntervalSince(max(a, from)) }
@@ -312,7 +403,7 @@ final class ContextSensor: NSObject, ObservableObject, CLLocationManagerDelegate
 
     /// 情境切换点：地点变了或者从静止变成乘车/步行。用来给整理切段。
     func changes(from: Date, to: Date) async -> [Date] {
-        var marks: [Date] = places(from: from, to: to).dropFirst().map { $0.0 }
+        var marks: [Date] = await confirmedPlaces(from: from, to: to).dropFirst().map { $0.0 }
         let acts = await activities(from: from, to: to)
         for i in acts.indices.dropFirst() where acts[i].2 != acts[i - 1].2 && acts[i].1.timeIntervalSince(acts[i].0) > 180 {
             marks.append(acts[i].0)

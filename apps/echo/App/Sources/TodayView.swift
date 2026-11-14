@@ -74,12 +74,11 @@ struct TodayView: View {
                 .animation(.spring(response: 0.5, dampingFraction: 0.88), value: digest?.items.count ?? 0)
             }
             .scrollDismissesKeyboard(.interactively)
-            .overlay(alignment: .bottomTrailing) {
-                JumpButtons(showTop: !headerVisible, showBottom: hasLines && !chapters.isEmpty && !endVisible,
-                            onTop: { withAnimation(.smooth(duration: 0.5)) { proxy.scrollTo("top", anchor: .top) } },
-                            onBottom: { withAnimation(.smooth(duration: 0.5)) { proxy.scrollTo("bottom", anchor: .bottom) } })
-                    .padding(.trailing, 16)
-                    .padding(.bottom, 14)
+            .overlay(alignment: .top) {
+                ScrollPill(title: "回到顶部", symbol: "arrow.up", show: !headerVisible) {
+                    withAnimation(.snappy(duration: 0.45)) { proxy.scrollTo("top", anchor: .top) }
+                }
+                .padding(.top, 6)
             }
             .onChange(of: chapters.count) { old, new in
                 // 只有本来就停在底部时才跟着往下走；正在往上翻看时不打断
@@ -160,7 +159,6 @@ struct TodayView: View {
                 .frame(maxWidth: 620)
                 .frame(maxWidth: .infinity)
                 .overlay(alignment: .bottomLeading) { heroCaption(digest) }
-                .shadow(color: Color.black.opacity(0.10), radius: 14, x: 0, y: 6)
                 .padding(.vertical, 6)
             Text(title)
                 .font(Ink.serif(29, relativeTo: .largeTitle))
@@ -415,34 +413,32 @@ extension View {
 }
 
 /// 回到顶部 / 跳到最新。
-struct JumpButtons: View {
-    let showTop: Bool
-    let showBottom: Bool
-    let onTop: () -> Void
-    let onBottom: () -> Void
+/// 翻得远了才出现的一颗小胶囊：点一下回去。只在需要时出现，平时就用手指拖。
+struct ScrollPill: View {
+    let title: String
+    let symbol: String
+    let show: Bool
+    let action: () -> Void
 
     var body: some View {
-        VStack(spacing: 10) {
-            if showTop { button("arrow.up", "回到顶部", onTop) }
-            if showBottom { button("arrow.down", "跳到最新", onBottom) }
+        ZStack {
+            if show {
+                Button(action: action) {
+                    Label(title, systemImage: symbol)
+                        .labelStyle(TightLabel())
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(Ink.ink)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Capsule().fill(.regularMaterial))
+                        .overlay(Capsule().strokeBorder(Ink.rule, lineWidth: 0.8))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .transition(.move(edge: symbol.contains("down") ? .bottom : .top).combined(with: .opacity))
+            }
         }
-        .animation(.snappy(duration: 0.25), value: showTop)
-        .animation(.snappy(duration: 0.25), value: showBottom)
-    }
-
-    private func button(_ symbol: String, _ label: String, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Ink.ink)
-                .frame(width: 42, height: 42)
-                .background(Circle().fill(Ink.paper))
-                .overlay(InkRing(seed: symbol.count == 8 ? 1 : 4).stroke(Ink.ink.opacity(0.7), lineWidth: 1).padding(1))
-                .shadow(color: .black.opacity(0.10), radius: 8, y: 2)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(label)
-        .transition(.scale(scale: 0.6).combined(with: .opacity))
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: show)
     }
 }
 

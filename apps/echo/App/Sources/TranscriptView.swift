@@ -96,12 +96,11 @@ struct TranscriptView: View {
                 }
                 .defaultScrollAnchor(.bottom)
                 .scrollDismissesKeyboard(.interactively)
-                .overlay(alignment: .bottomTrailing) {
-                    JumpButtons(showTop: !topVisible, showBottom: !bottomVisible,
-                                onTop: { withAnimation(.smooth(duration: 0.5)) { proxy.scrollTo("top", anchor: .top) } },
-                                onBottom: { withAnimation(.smooth(duration: 0.5)) { proxy.scrollTo("bottom", anchor: .bottom) } })
-                        .padding(.trailing, 16)
-                        .padding(.bottom, 14)
+                .overlay(alignment: .bottom) {
+                    ScrollPill(title: "回到最新", symbol: "arrow.down", show: !bottomVisible) {
+                        withAnimation(.snappy(duration: 0.45)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                    }
+                    .padding(.bottom, 12)
                 }
                 .toolbar {
                     if groups.count > 1 {

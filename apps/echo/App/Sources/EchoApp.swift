@@ -18,6 +18,7 @@ struct EchoApp: App {
         PhoneSync.shared.activate()
         if Store.isDemo { Demo.seed() }
         DigestCoordinator.shared.start()
+        DigestCoordinator.shared.refreshSettingsOnce()
         ContextSensor.shared.start()
         Cloud.migrate()
         Proactive.register()

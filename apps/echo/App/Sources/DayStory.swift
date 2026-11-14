@@ -33,7 +33,15 @@ struct RouteStop: Identifiable {
     var id: Int
     var name: String
     var time: Date
+    var minutes: Int
     var coordinate: CLLocationCoordinate2D
+}
+
+/// 一天的路线：真正停留过的地方（编号）+ 全部定位点连成的线（包括路过的，只画线不标名字）。
+struct DayRoute {
+    var stops: [RouteStop]
+    var track: [CLLocationCoordinate2D]
+    var isEmpty: Bool { stops.isEmpty && track.count < 2 }
 }
 
 @MainActor
@@ -63,23 +71,31 @@ final class StoryStore: ObservableObject {
 
     // MARK: 路线
 
-    func route(day: String) -> [RouteStop] {
+    /// 只把“停留”当成去过的地方：系统到访检测 ≥ 5 分钟、单个定位点 ≥ 15 分钟，并且那段时间大半不在车上。
+    /// 开车路过、堵车、等红灯的点只用来画线。
+    func route(day: String) async -> DayRoute {
         let start = Store.date(fromDayKey: day), end = start.addingTimeInterval(86_400)
         if Store.isDemo {
             let at = { (h: Int, m: Int) in Calendar.current.date(bySettingHour: h, minute: m, second: 0, of: start) ?? start }
-            return [RouteStop(id: 1, name: "文一西路", time: at(8, 52), coordinate: CLLocationCoordinate2D(latitude: 30.2862, longitude: 120.0423)),
-                    RouteStop(id: 2, name: "云栖小镇", time: at(9, 18), coordinate: CLLocationCoordinate2D(latitude: 30.1336, longitude: 120.0886)),
-                    RouteStop(id: 3, name: "云栖国际会展中心", time: at(9, 27), coordinate: CLLocationCoordinate2D(latitude: 30.1290, longitude: 120.0838))]
+            let track = [CLLocationCoordinate2D(latitude: 30.2862, longitude: 120.0423), CLLocationCoordinate2D(latitude: 30.2504, longitude: 120.0571),
+                         CLLocationCoordinate2D(latitude: 30.1912, longitude: 120.0702), CLLocationCoordinate2D(latitude: 30.1336, longitude: 120.0886),
+                         CLLocationCoordinate2D(latitude: 30.1290, longitude: 120.0838)]
+            return DayRoute(stops: [RouteStop(id: 1, name: "云栖国际会展中心", time: at(9, 27), minutes: 153,
+                                              coordinate: CLLocationCoordinate2D(latitude: 30.1290, longitude: 120.0838))], track: track)
         }
+        let sensor = ContextSensor.shared
+        let stays = await sensor.stays(from: start, to: end)
         var stops: [RouteStop] = []
-        for v in ContextSensor.shared.visits where v.arrive >= start && v.arrive < end {
-            let c = CLLocationCoordinate2D(latitude: v.lat, longitude: v.lon)
-            // 相邻的同一个地方合并
+        for s in stays {
+            let c = CLLocationCoordinate2D(latitude: s.lat, longitude: s.lon)
             if let last = stops.last, CLLocation(latitude: last.coordinate.latitude, longitude: last.coordinate.longitude)
-                .distance(from: CLLocation(latitude: c.latitude, longitude: c.longitude)) < 300 { continue }
-            stops.append(RouteStop(id: stops.count + 1, name: v.name ?? "某处", time: v.arrive, coordinate: c))
+                .distance(from: CLLocation(latitude: c.latitude, longitude: c.longitude)) < 300 {
+                stops[stops.count - 1].minutes += s.minutes
+                continue
+            }
+            stops.append(RouteStop(id: stops.count + 1, name: s.name ?? "某处", time: max(s.start, start), minutes: s.minutes, coordinate: c))
         }
-        return stops
+        return DayRoute(stops: stops, track: sensor.track(from: start, to: end))
     }
 
     // MARK: 生成
@@ -87,6 +103,8 @@ final class StoryStore: ObservableObject {
     private func sourceHash(day: String) -> String {
         let chapters = Store.shared.db.digests[day]?.chapters ?? []
         var h: UInt64 = 1469598103934665603
+        // v2：换了停留判断（以前把开车路过的地方也算进来了），旧的故事要重画
+        for b in "v2".utf8 { h = (h ^ UInt64(b)) &* 1099511628211 }
         for c in chapters {
             for b in (c.id.uuidString + c.title + c.summary).utf8 { h = (h ^ UInt64(b)) &* 1099511628211 }
         }
@@ -122,12 +140,12 @@ final class StoryStore: ObservableObject {
             rows.append("\(hm.string(from: c.start))–\(hm.string(from: c.end)) \(c.title)\(ctx.isEmpty ? "" : "［\(ctx)］")：\(c.summary)")
         }
         let todos = digest.items.filter { $0.kind == .todo }.map { $0.text }.prefix(5)
-        let route = self.route(day: day).map { "\(hm.string(from: $0.time)) \($0.name)" }
+        let route = await self.route(day: day).stops.map { "\(hm.string(from: $0.time)) \($0.name)（停留 \($0.minutes) 分钟）" }
         let scene = digest.scene ?? ""
         // 每天的数据放在最后，前面的说明每次都一样（命中 DeepSeek 的上下文缓存）
         let prompt = """
         【场合】\(scene.isEmpty ? "（没有）" : scene)
-        【路线】\(route.isEmpty ? "（没有定位）" : route.joined(separator: " → "))
+        【停留过的地方】\(route.isEmpty ? "（没有定位，或者一直在路上）" : route.joined(separator: " → "))
         【分章】
         \(rows.joined(separator: "\n"))
         【留下的待办】\(todos.isEmpty ? "（没有）" : todos.joined(separator: "；"))
@@ -179,7 +197,7 @@ final class StoryStore: ObservableObject {
     你是一个漫画分镜师，把“我”的一天画成一页四到六格的小漫画。输入是这一天已经整理好的分章、路线和待办。
     做法：
     1. 挑出 3–6 个最能代表这一天、我以后最想记得的瞬间，按时间顺序。一定要排除无关的：背景里别人的闲聊、电视声、听不清的碎片、重复的内容、没有后续的琐事。把排除掉的用几个字写进 skipped（最多 4 条）。
-    2. 每一格：time 用 HH:mm；place 用路线或分章里出现的地名（没有就不填）；scene 从给定的枚举里选最贴近的画面；caption 是一句第一人称的旁白，不超过 18 个字，有画面感、有一点情绪，不要流水账。
+    2. 每一格：time 用 HH:mm；place 只能用【停留过的地方】里的地名，而且时间要对得上（路过的地方不算，分章里的地点标签可能是开车路过的，不要用）；对不上就不填；scene 从给定的枚举里选最贴近的画面；caption 是一句第一人称的旁白，不超过 18 个字，有画面感、有一点情绪，不要流水账。
     3. title 是这页漫画的标题，不超过 10 个字；line 是一句话总结这一天，不超过 30 个字。
     只依据输入的内容，不编造没发生的事。调用 submit_story 交结果，不要写别的。
     """
@@ -460,29 +478,105 @@ struct ComicPanelView: View {
     }
 }
 
-/// 这一天的路线：经过的地方按顺序编号，连成一条线。
-struct RouteMapView: View {
-    let stops: [RouteStop]
+/// 路线图：用系统地图拍一张静态快照，再在上面画线和编号（后台线程画好，滚动时只是一张图，不卡）。
+enum RouteRenderer {
+    private static var cache: [String: UIImage] = [:]
+    private static let lock = NSLock()
 
-    var body: some View {
-        Map(initialPosition: .automatic) {
-            MapPolyline(coordinates: stops.map { $0.coordinate })
-                .stroke(Color(red: 0.62, green: 0.36, blue: 0.80), style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round, dash: [8, 6]))
-            ForEach(stops) { stop in
-                Annotation(stop.name, coordinate: stop.coordinate, anchor: .center) {
-                    Text("\(stop.id)")
-                        .font(.system(size: 12, weight: .heavy, design: .rounded))
-                        .foregroundStyle(.white)
-                        .frame(width: 24, height: 24)
-                        .background(Circle().fill(Daylight.rgb(stop.time).mix(RGB(0x000000), 0.15).color))
-                        .overlay(Circle().strokeBorder(Color.white, lineWidth: 2))
-                        .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
-                }
+    static func image(route: DayRoute, size: CGSize, scale: CGFloat, dark: Bool, key: String) async -> UIImage? {
+        lock.lock()
+        let hit = cache[key]
+        lock.unlock()
+        if let hit { return hit }
+        let coords = route.track + route.stops.map { $0.coordinate }
+        guard !coords.isEmpty, size.width > 10 else { return nil }
+        var minLat = coords[0].latitude, maxLat = minLat, minLon = coords[0].longitude, maxLon = minLon
+        for c in coords {
+            minLat = min(minLat, c.latitude); maxLat = max(maxLat, c.latitude)
+            minLon = min(minLon, c.longitude); maxLon = max(maxLon, c.longitude)
+        }
+        let span = MKCoordinateSpan(latitudeDelta: max(0.01, (maxLat - minLat) * 1.5), longitudeDelta: max(0.01, (maxLon - minLon) * 1.5))
+        let options = MKMapSnapshotter.Options()
+        options.region = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2), span: span)
+        options.size = size
+        options.scale = scale
+        options.pointOfInterestFilter = .excludingAll
+        options.traitCollection = UITraitCollection(userInterfaceStyle: dark ? .dark : .light)
+        let snapshotter = MKMapSnapshotter(options: options)
+        guard let shot = try? await snapshotter.start() else { return nil }
+        let stops = route.stops, track = route.track
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = scale
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+            shot.image.draw(at: .zero)
+            let cg = ctx.cgContext
+            // 一层淡淡的暖色，和画风统一
+            cg.setFillColor(UIColor(red: 1, green: 0.85, blue: 0.75, alpha: dark ? 0.06 : 0.12).cgColor)
+            cg.fill(CGRect(origin: .zero, size: size))
+            // 路线：虚线
+            let points = track.map { shot.point(for: $0) }
+            if points.count >= 2 {
+                cg.setLineCap(.round)
+                cg.setLineJoin(.round)
+                cg.setStrokeColor(UIColor.white.withAlphaComponent(0.85).cgColor)
+                cg.setLineWidth(6)
+                cg.addLines(between: points)
+                cg.strokePath()
+                cg.setStrokeColor(UIColor(red: 0.62, green: 0.36, blue: 0.80, alpha: 1).cgColor)
+                cg.setLineWidth(3.5)
+                cg.setLineDash(phase: 0, lengths: [7, 5])
+                cg.addLines(between: points)
+                cg.strokePath()
+                cg.setLineDash(phase: 0, lengths: [])
+            }
+            // 停留：编号的圆点
+            for stop in stops {
+                let p = shot.point(for: stop.coordinate)
+                let r: CGFloat = 12
+                let rect = CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)
+                let tint = Daylight.rgb(stop.time).mix(RGB(0x000000), 0.2)
+                cg.setShadow(offset: CGSize(width: 0, height: 1), blur: 3, color: UIColor.black.withAlphaComponent(0.3).cgColor)
+                cg.setFillColor(UIColor(red: tint.r, green: tint.g, blue: tint.b, alpha: 1).cgColor)
+                cg.fillEllipse(in: rect)
+                cg.setShadow(offset: .zero, blur: 0, color: nil)
+                cg.setStrokeColor(UIColor.white.cgColor)
+                cg.setLineWidth(2)
+                cg.strokeEllipse(in: rect.insetBy(dx: 1, dy: 1))
+                let label = "\(stop.id)" as NSString
+                let attrs: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: 12, weight: .heavy), .foregroundColor: UIColor.white]
+                let ts = label.size(withAttributes: attrs)
+                label.draw(at: CGPoint(x: p.x - ts.width / 2, y: p.y - ts.height / 2), withAttributes: attrs)
             }
         }
-        .mapStyle(.standard(elevation: .flat, pointsOfInterest: .excludingAll))
-        .allowsHitTesting(false)
-        .accessibilityLabel("这一天的路线：" + stops.map { $0.name }.joined(separator: "、"))
+        lock.lock()
+        if cache.count > 20 { cache.removeAll() }
+        cache[key] = image
+        lock.unlock()
+        return image
+    }
+}
+
+struct RouteSnapshotView: View {
+    let route: DayRoute
+    let key: String
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.displayScale) private var displayScale
+    @State private var image: UIImage?
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                Rectangle().fill(Ink.wash)
+                if let image { Image(uiImage: image).resizable().transition(.opacity) }
+            }
+            .task(id: "\(key)-\(Int(geo.size.width))-\(scheme == .dark)") {
+                let size = geo.size, dark = scheme == .dark
+                let k = "\(key)-\(Int(size.width))x\(Int(size.height))-\(dark)"
+                let rendered = await RouteRenderer.image(route: route, size: size, scale: min(displayScale, 2), dark: dark, key: k)
+                withAnimation(.easeOut(duration: 0.3)) { image = rendered }
+            }
+        }
+        .accessibilityLabel("这一天的路线：" + route.stops.map { $0.name }.joined(separator: "、"))
     }
 }
 
@@ -491,10 +585,11 @@ struct DayStoryCard: View {
     let day: String
     @ObservedObject private var stories = StoryStore.shared
     @EnvironmentObject private var store: Store
+    @State private var route: DayRoute?
 
     var body: some View {
         let story = stories.stories[day]
-        let stops = stories.route(day: day)
+        let stops = route?.stops ?? []
         let chapters = store.db.digests[day]?.chapters ?? []
         if story != nil || chapters.count >= 2 {
             VStack(alignment: .leading, spacing: 12) {
@@ -528,17 +623,23 @@ struct DayStoryCard: View {
                 if let error = stories.lastError, stories.working == nil, story == nil {
                     Text(error).font(.footnote).foregroundStyle(Ink.vermilion)
                 }
-                if stops.count >= 2 {
-                    RouteMapView(stops: stops)
+                if let route, !route.isEmpty {
+                    RouteSnapshotView(route: route, key: "route-\(day)-\(route.track.count)-\(stops.count)")
                         .frame(height: 190)
                         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Ink.rule, lineWidth: 1))
-                    Text(stops.map { "\($0.id) \($0.name)" }.joined(separator: "  →  "))
+                    Text(stops.isEmpty ? "一直在路上，没有在哪儿停下来" :
+                            stops.map { "\($0.id) \($0.name) \($0.minutes >= 60 ? String(format: "%.1f 小时", Double($0.minutes) / 60) : "\($0.minutes) 分钟")" }.joined(separator: "  →  "))
                         .font(.caption)
                         .foregroundStyle(Ink.ink2)
                         .lineLimit(2)
+                    if !ContextSensor.motionOn && !Store.isDemo {
+                        Text("打开“设置 › 情境感知 › 身体状态”，能把堵车、等红灯这类在车上的停顿排除掉，地点会更准。")
+                            .font(.caption2).foregroundStyle(Ink.ink3)
+                    }
                 }
             }
+            .task(id: day) { route = await stories.route(day: day) }
         }
     }
 
@@ -565,6 +666,5 @@ struct DayStoryCard: View {
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color(red: 1, green: 0.99, blue: 0.96)))
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.black.opacity(0.85), lineWidth: 1))
-        .shadow(color: .black.opacity(0.08), radius: 10, y: 4)
     }
 }

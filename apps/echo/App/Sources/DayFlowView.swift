@@ -128,13 +128,6 @@ private struct ChapterRow: View {
         let strong = scheme == .dark ? 0.20 : 0.16
         return shape
             .fill(LinearGradient(colors: [tint.color(strong), tint.color(strong * 0.35)], startPoint: .topLeading, endPoint: .bottomTrailing))
-            .overlay(
-                Image(uiImage: PaperGrain.tile)
-                    .resizable(resizingMode: .tile)
-                    .opacity(0.10)
-                    .blendMode(scheme == .dark ? .screen : .multiply)
-                    .clipShape(shape)
-            )
             .overlay(shape.strokeBorder(tint.color(scheme == .dark ? 0.35 : 0.28), lineWidth: 0.8))
     }
 
