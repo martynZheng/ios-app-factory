@@ -50,7 +50,7 @@ struct MemoryView: View {
             } label: {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("顶层记忆").font(.body.weight(.semibold))
-                    Text(memory.index.isEmpty ? "还是空的" : String(memory.index.prefix(160)))
+                    Text(memory.index.isEmpty ? "还是空的" : preview)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .lineLimit(4)
@@ -60,6 +60,17 @@ struct MemoryView: View {
         } footer: {
             Text("每次对话都会整页带上它；更多的内容按需去维基、笔记、原始记录里找。")
         }
+    }
+
+    /// 顶层的前几行，去掉 Markdown 标记
+    private var preview: String {
+        let lines = memory.index.split(separator: "\n").map { line -> String in
+            var t = String(line).trimmingCharacters(in: .whitespaces)
+            while t.hasPrefix("#") { t.removeFirst() }
+            if t.hasPrefix("- ") { t = "· " + t.dropFirst(2) }
+            return t.trimmingCharacters(in: .whitespaces)
+        }
+        return String(lines.filter { !$0.isEmpty }.prefix(5).joined(separator: "\n").prefix(200))
     }
 
     private var dreamSection: some View {

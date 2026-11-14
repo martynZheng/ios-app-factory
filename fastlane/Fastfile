@@ -40,6 +40,18 @@ platform :ios do
       | xcbeautify
     ].join(" "))
 
+    # 不签名的 archive 里不带 entitlements，导出时的云端签名就不知道 App 要 HealthKit 等特殊能力。
+    # 有 App/App.entitlements（XcodeGen 按 project.yml 生成）时，先用 ad-hoc 签名把它写进 App；
+    # 导出时会读这份 entitlements，为它申请带对应能力的描述文件并重新签名。嵌套的 App（手表）先签，外层后签。
+    app_entitlements = File.join(root, "App", "App.entitlements")
+    if File.exist?(app_entitlements)
+      app = Dir[File.join(archive, "Products", "Applications", "*.app")].first
+      UI.user_error!("archive 里没找到 .app") unless app
+      nested = Dir[File.join(app, "**", "*.{app,appex,framework}")].sort_by { |p| -p.length }
+      nested.each { |n| sh("codesign --force --sign - #{n.shellescape}") }
+      sh("codesign --force --sign - --entitlements #{app_entitlements.shellescape} #{app.shellescape}")
+    end
+
     export_options = File.join(build_dir, "ExportOptions.plist")
     File.write(export_options, <<~PLIST)
       <?xml version="1.0" encoding="UTF-8"?>
