@@ -183,8 +183,7 @@ final class Proactive {
             var tools = assistant.readTools(collect: { sources.append(contentsOf: $0) }, question: nil)
             tools.append(contentsOf: Connectors.shared.agentTools(readOnly: true))
             tools.append(AgentTool(name: "push", description: "把整理好的内容推给我。title 不超过 14 个字；body 是正文。",
-                                   parameters: ["type": "object", "properties": ["title": str, "body": str, "recheck_minutes": recheckProp], "required": ["title", "body", "recheck_minutes"]]) { args in
-                recheck(args)
+                                   parameters: ["type": "object", "properties": ["title": str, "body": str], "required": ["title", "body"]]) { args in
                 out = (String((args["title"] as? String ?? "").prefix(24)), String((args["body"] as? String ?? "").prefix(900)))
                 return ToolResult(content: "已推送。", terminate: true)
             })
