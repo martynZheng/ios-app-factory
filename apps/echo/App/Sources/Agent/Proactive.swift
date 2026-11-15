@@ -23,7 +23,6 @@ final class Proactive {
                 Proactive.scheduleRefresh()
                 let work = Task { @MainActor in
                     await Signals.shared.scan()
-                    await Proactive.shared.consider(reason: "系统给了后台时间")
                     await Proactive.shared.brief()
                 }
                 task.expirationHandler = { work.cancel() }
@@ -64,51 +63,44 @@ final class Proactive {
         try? BGTaskScheduler.shared.submit(request)
     }
 
-    /// 每类唤醒各自的冷却（分钟）：你说“提醒我”几乎立刻办；关心你的状态不要太频繁。
-    static let cooldown: [String: Double] = ["request": 2, "commitment": 20, "care": 75, "place": 40, "general": 50]
+    /// 下次什么时候再醒：由智能体每次自己定（recheck_minutes），这里只记下来。
+    private static let nextKey = "proactiveNextCheck"
 
-    /// 节制：安静时段不打扰，同类唤醒有冷却，一天最多推 8 条（你要求的提醒不占名额）。
-    private func allowed(kind: String) -> Bool {
+    /// 把上次醒来之后的新情况交给智能体，让它决定说不说、说什么、隔多久再看。
+    /// 返回这次是否真的醒了（没到它定的时间就不醒，新话留着下次一起给）。
+    @discardableResult
+    func consider(reason: String, evidence: [String] = [], force: Bool = false) async -> Bool {
         let d = UserDefaults.standard
-        guard Self.enabled, Cloud.ready, !Store.isDemo else { return false }
-        let hour = Calendar.current.component(.hour, from: Date())
-        if kind != "request" && (hour < 8 || hour >= 23) { return false }
-        let last = d.double(forKey: "proactiveLastRun-" + kind)
-        if Date().timeIntervalSince1970 - last < (Self.cooldown[kind] ?? 50) * 60 { return false }
-        let today = Store.dayKey(Date())
-        if d.string(forKey: "proactiveDay") != today {
-            d.set(today, forKey: "proactiveDay")
-            d.set(0, forKey: "proactiveCount")
-        }
-        return kind == "request" || d.integer(forKey: "proactiveCount") < 8
-    }
-
-    /// kind：request（我说了提醒我）/ commitment（答应了别人）/ care（抱怨、累、长途）/ place / general。
-    /// evidence：本机检测到的原话和情境，直接交给智能体，不用它自己大海捞针。
-    func consider(reason: String, kind: String = "general", evidence: [String] = []) async {
-        // 正在跑一次的时候来了更要紧的（你要求的提醒），等它跑完再来
-        if running && kind == "request" {
-            for _ in 0..<30 where running { try? await Task.sleep(nanoseconds: 2_000_000_000) }
-        }
-        guard !running, allowed(kind: kind) else { return }
+        let now = Date().timeIntervalSince1970
+        guard Self.enabled, Cloud.ready, !Store.isDemo, !running else { return false }
+        guard force || now >= d.double(forKey: Self.nextKey) else { return false }
         running = true
         defer { running = false }
-        let d = UserDefaults.standard
-        d.set(Date().timeIntervalSince1970, forKey: "proactiveLastRun-" + kind)
+        // 万一这次失败或者它没说，10 分钟后再来
+        d.set(now + 600, forKey: Self.nextKey)
+        func recheck(_ args: [String: Any]) {
+            let value = args["recheck_minutes"]
+            let parsed: Double? = (value as? Double) ?? Double(value as? String ?? "")
+            guard let minutes = parsed, minutes > 0 else { return }
+            d.set(Date().timeIntervalSince1970 + min(minutes, 24 * 60) * 60, forKey: Self.nextKey)
+        }
+        let recheckProp: [String: Any] = ["type": "number", "description": "多少分钟后再醒来看一眼。按你判断接下来可能会发生什么来定。"]
         do {
             let assistant = Assistant.shared
             var out: (String, String)?
             let str: [String: Any] = ["type": "string"]
             var tools = assistant.readTools(collect: { _ in }, question: nil)
             tools.append(contentsOf: Connectors.shared.agentTools(readOnly: true))
-            tools.append(AgentTool(name: "notify", description: "发一条通知给我。只有现在说确实有用时才用。",
-                                   parameters: ["type": "object", "properties": ["title": str, "body": str], "required": ["title", "body"]]) { args in
+            tools.append(AgentTool(name: "notify", description: "现在发一条通知给我。",
+                                   parameters: ["type": "object", "properties": ["title": str, "body": str, "recheck_minutes": recheckProp], "required": ["title", "body", "recheck_minutes"]]) { args in
+                recheck(args)
                 out = (String((args["title"] as? String ?? "").prefix(20)), String((args["body"] as? String ?? "").prefix(90)))
                 return ToolResult(content: "已发出。", terminate: true)
             })
             var later: (Date, String, String)?
-            tools.append(AgentTool(name: "notify_later", description: "在指定时间发一条通知给我（我说“几点提醒我…”时用）。time 用 HH:mm（今天）或 yyyy-MM-dd HH:mm。",
-                                   parameters: ["type": "object", "properties": ["time": str, "title": str, "body": str], "required": ["time", "title", "body"]]) { args in
+            tools.append(AgentTool(name: "notify_later", description: "在指定时间发一条通知给我。time 用 HH:mm（今天）或 yyyy-MM-dd HH:mm。",
+                                   parameters: ["type": "object", "properties": ["time": str, "title": str, "body": str, "recheck_minutes": recheckProp], "required": ["time", "title", "body", "recheck_minutes"]]) { args in
+                recheck(args)
                 let raw = (args["time"] as? String ?? "").trimmingCharacters(in: .whitespaces)
                 let f = DateFormatter()
                 f.locale = Locale(identifier: "en_US_POSIX")
@@ -120,9 +112,10 @@ final class Proactive {
                 later = (date, String((args["title"] as? String ?? "").prefix(20)), String((args["body"] as? String ?? "").prefix(90)))
                 return ToolResult(content: "已定好。", terminate: true)
             })
-            tools.append(AgentTool(name: "stay_quiet", description: "现在没有值得提醒的事。",
-                                   parameters: ["type": "object", "properties": [String: Any]()]) { _ in
-                ToolResult(content: "好。", terminate: true)
+            tools.append(AgentTool(name: "stay_quiet", description: "现在不说。",
+                                   parameters: ["type": "object", "properties": ["recheck_minutes": recheckProp], "required": ["recheck_minutes"]]) { args in
+                recheck(args)
+                return ToolResult(content: "好。", terminate: true)
             })
             let system = await assistant.systemPrompt(proactive: true)
             let sent = ChatStore.shared.messages.filter { $0.proactive && Calendar.current.isDateInToday($0.time) }.map { "- \($0.text)" }
@@ -137,7 +130,6 @@ final class Proactive {
                 ChatStore.shared.append(message)
             }
             if let (title, body) = out, !title.isEmpty {
-                d.set(d.integer(forKey: "proactiveCount") + 1, forKey: "proactiveCount")
                 _ = await Pusher.now(title: title, body: body)
                 var message = ChatMessage(role: .assistant, text: body.isEmpty ? title : "**\(title)**\n\(body)")
                 message.proactive = true
@@ -146,14 +138,15 @@ final class Proactive {
         } catch {
             // 主动检查失败不打扰你，下次再试
         }
+        return true
     }
 
     static func wakePrompt(reason: String, evidence: [String], already: String) -> String {
         var text = "你被唤醒了（原因：\(reason)）。"
         if !evidence.isEmpty {
-            text += "\n本机刚听到 / 看到的：\n" + evidence.map { "- " + $0 }.joined(separator: "\n")
+            text += "\n上次醒来之后新听到的（方括号是声纹和声音分类的猜测：[我] 是我本人，[说话人 X] 或名字是别人，[背景] 是远处的人声，[电视/音乐] 是放出来的声音，没有方括号是还没认出来；转写可能有错字）：\n" + evidence.map { "- " + $0 }.joined(separator: "\n")
         }
-        text += "\n\(already)\n看看现在有没有值得跟我说的事。"
+        text += "\n\(already)"
         return text
     }
 
@@ -190,7 +183,8 @@ final class Proactive {
             var tools = assistant.readTools(collect: { sources.append(contentsOf: $0) }, question: nil)
             tools.append(contentsOf: Connectors.shared.agentTools(readOnly: true))
             tools.append(AgentTool(name: "push", description: "把整理好的内容推给我。title 不超过 14 个字；body 是正文。",
-                                   parameters: ["type": "object", "properties": ["title": str, "body": str], "required": ["title", "body"]]) { args in
+                                   parameters: ["type": "object", "properties": ["title": str, "body": str, "recheck_minutes": recheckProp], "required": ["title", "body", "recheck_minutes"]]) { args in
+                recheck(args)
                 out = (String((args["title"] as? String ?? "").prefix(24)), String((args["body"] as? String ?? "").prefix(900)))
                 return ToolResult(content: "已推送。", terminate: true)
             })

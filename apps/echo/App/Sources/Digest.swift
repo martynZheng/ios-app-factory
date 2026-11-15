@@ -509,7 +509,7 @@ final class DigestCoordinator: ObservableObject {
             self.agentStatus = nil
             self.working = false
             Notifier.apply()
-            if self.lastError == nil { await Proactive.shared.consider(reason: "刚整理出新的一段对话") }
+            if self.lastError == nil { await Signals.shared.scan() }
         }
     }
 }
