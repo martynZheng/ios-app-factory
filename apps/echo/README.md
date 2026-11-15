@@ -88,7 +88,7 @@ Sync      outbox 落盘 + transferFile  ──▶  Store        JSON 库 + 音�
 - **主动找你**：到点的事提醒（原有）+ 资讯流（上午、傍晚各一次，按话题和记忆联网整理，有内容才发）。iOS 不允许真正常驻后台，触发时机是：打开 App、系统给的后台刷新、新整理出一段、到新地点。
 - **唤醒**（`Agent/Signals.swift`）：不在本机用词表/分数/阈值预筛。转写完一段、声纹做完、手机接力每 3 分钟、回到前台、到新地点、系统给后台时间时，把上次醒来之后新听到的话（带声纹/声音分类标注）原样交给智能体，由它决定 notify / notify_later / stay_quiet，并且**自己定下次隔多久再醒**（`recheck_minutes`）；没到它定的时间就把新话攒着下次一起给。交代给它的话在 `Assistant.proactiveRules`，只讲处境和能做什么，不列规则。
   - 时效：手机锁屏时 App 只在手表传来录音的那一小会儿被系统叫醒；要“边开车边发现”，打开**手机接力**（App 常驻后台）。
-  - 评测：`DEEPSEEK_API_KEY=… python3 bench/bench.py --runs 2`，场景在 `bench/scenarios.json`（`expect` 是可以接受的选择）。改提示词后跑一遍。
+  - 评测：`DEEPSEEK_API_KEY=… python3 bench/bench.py --runs 2`，场景在 `bench/scenarios.json`（`expect` 是可以接受的选择）。`proactiveRules` 由 `bench/optimize.py` 自动调出来：评测 → 把做错的案例、历次版本和得分交给 deepseek-reasoner 改写 → 再评测，直到训练集全对、模型看不到的验收集（`bench/holdout.json`）≥90%；不许写关键词表、事件清单、阈值。加了新场景就重跑 `python3 bench/optimize.py --write`。
 - **连接器**：远程 MCP（对话页「+」›「能力与连接器」）。助理自己醒来时只用标了 `readOnlyHint` 的工具。
 - 密钥只在 App 里填（钥匙串），不进仓库。
 - **画图**：`draw_chart` 工具（`ChartCard.swift`，Swift Charts）。模型给横轴标签和 1–4 条数据，可左右双轴；右轴数据换算到左轴范围里画。数据必须是查到的真实数字。

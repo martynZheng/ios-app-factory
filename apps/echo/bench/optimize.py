@@ -107,6 +107,7 @@ def main():
             best = (score, rules, train, hold)
             best_fails = fails
         if train == 1 and hold >= need:
+            best = (score, rules, train, hold)
             print("通过。")
             break
         if it == iters:
