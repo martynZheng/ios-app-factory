@@ -61,11 +61,27 @@ final class PhoneSync: NSObject, ObservableObject, WCSessionDelegate {
             }
             Store.shared.addSegment(Segment(id: id, sessionID: sid, index: index, start: start, duration: duration,
                                             hasAudio: true, status: .pending, error: nil))
+            // 刚录完的分段也算一次心跳（手表还在录）
+            Task { @MainActor in PhoneRelay.shared.heartbeat(recording: true, at: start.addingTimeInterval(duration)) }
             Transcriber.shared.kick()
         }
     }
 
+    private func handleHeartbeat(_ info: [String: Any]) -> Bool {
+        guard info[Wire.heartbeat] as? Bool == true else { return false }
+        let recording = info[Wire.recording] as? Bool ?? false
+        let at = (info[Wire.at] as? Double).map { Date(timeIntervalSince1970: $0) } ?? Date()
+        let reason = info[Wire.reason] as? String
+        Task { @MainActor in PhoneRelay.shared.heartbeat(recording: recording, at: at, reason: reason) }
+        return true
+    }
+
+    func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        _ = handleHeartbeat(message)
+    }
+
     func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
+        if handleHeartbeat(userInfo) { return }
         guard let sid = userInfo[Wire.deleteSession] as? String else { return }
         DispatchQueue.main.async { Store.shared.deleteSession(sid, tombstone: true) }
     }

@@ -48,7 +48,14 @@ enum Demo {
             let t = base.addingTimeInterval(Double(row.0) * 60)
             let seg = Segment(id: "demo_\(i)", sessionID: "demo", index: i, start: t, duration: 60, hasAudio: false, status: .done, error: nil)
             segments.append(seg)
-            lines.append(Line(id: UUID(), segmentID: seg.id, time: t, offset: 0, text: row.1, edited: false))
+            var line = Line(id: UUID(), segmentID: seg.id, time: t, offset: 0, text: row.1, edited: false)
+            // 演示“谁说的”：主持的话是我，选手是认识的声音，中场有一句远处的背景
+            switch i {
+            case 0, 1, 2, 9, 13, 14: line.speaker = "me"; line.zone = "me"
+            case 3, 4, 5, 6, 7, 8, 10, 11, 12: line.speaker = i < 9 ? "demo-a" : "demo-b"; line.zone = "near"
+            default: line.zone = "far"
+            }
+            lines.append(line)
         }
         store.mutate { db in
             db.segments = segments

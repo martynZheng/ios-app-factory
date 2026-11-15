@@ -9,6 +9,8 @@ struct TranscriptView: View {
     @State private var query = ""
     @State private var editing: Line?
     @State private var draft = ""
+    @State private var naming: Line?
+    @State private var speakerDraft = ""
     @State private var topVisible = true
     @State private var bottomVisible = true
 
@@ -129,6 +131,18 @@ struct TranscriptView: View {
         .searchable(text: $query, prompt: "搜索说过的话")
         .safeAreaInset(edge: .bottom) { workingPill }
         .sheet(item: $editing) { line in editor(line) }
+        .alert("这是谁说的", isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
+            TextField("名字，如：阿杰", text: $speakerDraft)
+            Button("好") {
+                if let line = naming {
+                    let name = speakerDraft
+                    Task { await VoiceAnalyzer.shared.name(line, as: name) }
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("以后同一个声音会自动认出来。")
+        }
     }
 
     private func dayLabel(_ key: String) -> String {
@@ -159,6 +173,10 @@ struct TranscriptView: View {
             }
         }
         Button { draft = line.text; editing = line } label: { Label("修改文字", systemImage: "pencil") }
+        if store.segment(line.segmentID)?.hasAudio ?? false {
+            Button { Task { await VoiceAnalyzer.shared.markMe(line) } } label: { Label("这是我说的", systemImage: "person.wave.2") }
+            Button { speakerDraft = VoiceAnalyzer.shared.label(line.speaker) ?? ""; naming = line } label: { Label("这是谁说的…", systemImage: "person.crop.circle.badge.questionmark") }
+        }
         Button { UIPasteboard.general.string = line.text } label: { Label("复制", systemImage: "doc.on.doc") }
         Divider()
         Button(role: .destructive) {

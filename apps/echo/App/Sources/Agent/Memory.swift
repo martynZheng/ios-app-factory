@@ -226,7 +226,8 @@ final class MemoryFS: ObservableObject {
         }
         let lines = store.lines(on: day)
         if !lines.isEmpty {
-            parts.append("## 录音转写\n" + lines.map { "- \(hm.string(from: $0.time)) \($0.text)" }.joined(separator: "\n"))
+            let voice = VoiceAnalyzer.shared
+            parts.append("## 录音转写\n" + lines.map { "- \(hm.string(from: $0.time)) \(voice.prefix($0))\($0.text)" }.joined(separator: "\n"))
             bits.append("\(lines.count) 句录音")
         }
         let chats = ChatStore.shared.messages.filter { Store.dayKey($0.time) == day && !$0.failed }

@@ -45,6 +45,18 @@ final class Sync: NSObject, ObservableObject, WCSessionDelegate {
         refreshPending()
     }
 
+    /// 心跳：告诉手机“手表还在录 / 停了”。手机据此决定要不要接力录音。能直接送达就发消息，否则排队。
+    func heartbeat(recording: Bool, reason: String? = nil) {
+        guard WCSession.isSupported(), WCSession.default.activationState == .activated else { return }
+        var info: [String: Any] = [Wire.heartbeat: true, Wire.recording: recording, Wire.at: Date().timeIntervalSince1970]
+        if let reason { info[Wire.reason] = reason }
+        if WCSession.default.isReachable {
+            WCSession.default.sendMessage(info, replyHandler: nil) { _ in WCSession.default.transferUserInfo(info) }
+        } else {
+            WCSession.default.transferUserInfo(info)
+        }
+    }
+
     private func send(_ url: URL) {
         guard WCSession.default.activationState == .activated else { return }
         guard let data = try? Data(contentsOf: sidecar(url)),

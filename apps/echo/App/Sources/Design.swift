@@ -109,8 +109,11 @@ struct TranscriptBubble: View {
         let hasAudio = store.segment(line.segmentID)?.hasAudio ?? false
         let playing = player.playingSegment == line.segmentID
         let stamp = Daylight.time(line.time) + (line.edited ? " 已改" : "")
+        let voice = VoiceAnalyzer.shared
+        let tag: String? = line.zone == "media" ? "电视/音乐" : (line.zone == "far" ? "背景" : voice.label(line.speaker))
+        let tagColor = line.zone == "media" || line.zone == "far" ? Ink.ink3 : VoiceAnalyzer.color(line.speaker)
         // 末尾放一段透明的时间文字占位，再把真正的时间叠在右下角
-        (Text(line.text) + Text("　\(stamp)").font(.caption2).foregroundColor(.clear))
+        ((tag.map { Text($0 + "  ").font(.caption.weight(.bold)).foregroundColor(tagColor) } ?? Text("")) + Text(line.text) + Text("　\(stamp)").font(.caption2).foregroundColor(.clear))
             .font(.body)
             .foregroundStyle(Ink.ink)
             .lineSpacing(3)
@@ -135,6 +138,7 @@ struct TranscriptBubble: View {
                 shape.fill(playing ? Ink.vermilion.opacity(0.08) : (highlight?.opacity(0.08) ?? Ink.wash))
                     .overlay(shape.strokeBorder(playing ? Ink.vermilion.opacity(0.5) : Ink.rule, lineWidth: 0.7))
             }
+            .opacity(line.zone == "far" || line.zone == "media" ? 0.55 : 1)
             .contentShape(Rectangle())
             .onTapGesture {
                 if hasAudio { player.toggle(segmentID: line.segmentID, at: line.offset) }

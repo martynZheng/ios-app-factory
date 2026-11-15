@@ -12,6 +12,8 @@ struct Segment: Codable, Identifiable {
     var hasAudio: Bool
     var status: SegStatus
     var error: String?
+    /// 声纹和声音分类已经做过
+    var voice: Bool? = nil
 }
 
 /// 一句转写。time 是绝对时间，offset 是在所属分段音频里的秒数。
@@ -22,6 +24,10 @@ struct Line: Codable, Identifiable {
     var offset: Double
     var text: String
     var edited: Bool
+    /// 谁说的："me" 是我；其他是 SpeakerBook 里的编号。没分析过是 nil。
+    var speaker: String? = nil
+    /// me（我说的）/ near（在跟我说话的人）/ far（远处、背景里的人声）/ media（电视、音乐、广播）
+    var zone: String? = nil
 }
 
 enum ItemKind: String, Codable { case point, decision, todo, pending }

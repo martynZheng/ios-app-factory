@@ -38,8 +38,7 @@ final class Player: NSObject, ObservableObject, AVAudioPlayerDelegate {
         if playingSegment == segmentID { stop(); return }
         stop()
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
-            try AVAudioSession.sharedInstance().setActive(true)
+            try AudioGate.preparePlayback()
             let p = try AVAudioPlayer(contentsOf: Store.shared.audioURL(segmentID))
             p.delegate = self
             p.currentTime = max(0, offset - 0.5)

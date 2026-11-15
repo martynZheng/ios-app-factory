@@ -37,6 +37,11 @@ struct TodayView: View {
                         .id("top")
                         .onAppear { headerVisible = true }
                         .onDisappear { headerVisible = false }
+                    if day == Store.dayKey(Date()) && !Store.isDemo {
+                        RelayCard()
+                            .padding(.horizontal, 22)
+                            .padding(.top, 18)
+                    }
                     if hasLines {
                         DayStoryCard(day: day)
                             .padding(.horizontal, 22)

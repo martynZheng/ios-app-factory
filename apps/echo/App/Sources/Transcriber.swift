@@ -166,6 +166,7 @@ final class Transcriber: ObservableObject {
         recognizer = nil
         busy = false
         NotificationCenter.default.post(name: .transcriptChanged, object: nil)
+        Task { @MainActor in VoiceAnalyzer.shared.kick() }
         kick()
         DispatchQueue.main.asyncAfter(deadline: .now() + 20) {
             if !self.busy && !DigestCoordinator.shared.working { self.endBackground() }

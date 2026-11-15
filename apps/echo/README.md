@@ -111,3 +111,19 @@ Sync      outbox 落盘 + transferFile  ──▶  Store        JSON 库 + 音�
 晚上 9 点后（打开 App 或夜里后台时间）把这一天挑 3–6 个瞬间画成一页小漫画，配上路线图，排除无关内容。
 省 Token：输入只用已经整理好的分章和地名（不重读转写），一次请求、不开思考、用 submit_story 交结构化结果；分章没变就不重画（sourceHash）；
 画面全在本机用粉彩引擎（PanelPainter）和系统地图画，不调图像模型；固定说明在系统提示、每天的数据在最后，命中 DeepSeek 上下文缓存。
+
+## 手机接力（Voice/PhoneRelay.swift）
+
+手表没电、没戴或没在录时，手机接着录。iOS 不允许在后台自己打开麦克风，所以要你在手机上点一次“开启”（今日页或设置）；之后：
+手表在录 → 手机待命（麦克风开着、不保存）；收不到手表心跳超过 3 分钟、或手表报告没电/停止 → 手机开始保存 1 分钟一段的录音并发通知；手表恢复 → 交回。
+手表每分钟发一次心跳（WCSession sendMessage，送不到就 transferUserInfo），收到的录音分段也算心跳。接力期间系统一直显示橙色麦克风指示。
+需要 UIBackgroundModes: audio。朗读、回听、语音输入通过 AudioGate 共用录音会话，不会把接力的麦克风停掉。
+
+## 谁在说话（Voice/VoiceEncoder.swift、VoiceAnalyzer.swift）
+
+本机运行，音频不出手机：
+- 声音分类：系统 SoundAnalysis 自带分类器（version1），每 0.5 秒判断人声 / 电视音乐 / 其他。
+- 声纹：Resemblyzer 的 GE2E 编码器（Apache 2.0，`voice/LICENSE-Resemblyzer`），权重由 `voice/export.py` 导出成 `App/Resources/ge2e.bin`（5.7 MB），Swift 用 Accelerate 跑 3 层 LSTM。
+  `voice/ge2e.py` 是不依赖 PyTorch 的 numpy 参考实现，Swift 逐行对应。实测（DeepSeek 合成的两种声音）：同环境下同一人 0.84–0.96、不同人 0.43–0.63；远场混响下同一人最低 0.68。
+- 认人：“我”的声纹按设备分开存（手表、手机的麦克风不同）；设置里录 20 秒建立，之后高置信度的片段自动校准。其他声音在线聚类成“说话人 A/B…”，可以起名字，起了名字的长期认得。
+- 关注度：我 / 近处（音量接近我说话的音量）/ 背景（远、小声）/ 电视音乐。整理、记忆里的原话带 [我] [某人] [背景] [电视/音乐] 前缀，背景和媒体里的话不提待办。

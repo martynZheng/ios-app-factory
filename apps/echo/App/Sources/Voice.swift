@@ -82,8 +82,12 @@ final class VoiceInput: NSObject, ObservableObject {
         Speaker.shared.stop()
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
-            try session.setActive(true)
+            if AudioGate.relayActive {
+                try AudioGate.configureShared()
+            } else {
+                try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
+                try session.setActive(true)
+            }
             let settings: [String: Any] = [
                 AVFormatIDKey: Int(kAudioFormatLinearPCM),
                 AVSampleRateKey: 16000.0,
@@ -135,7 +139,7 @@ final class VoiceInput: NSObject, ObservableObject {
         recorder?.stop()
         recorder = nil
         level = 0
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        AudioGate.release()
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         guard send, length >= 0.6 else {
             if send { error = "说得太短了，再试一次。" }
@@ -237,8 +241,7 @@ final class Speaker: NSObject, ObservableObject, AVSpeechSynthesizerDelegate, AV
 
     private func play(_ data: Data) -> Bool {
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
-            try AVAudioSession.sharedInstance().setActive(true)
+            try AudioGate.preparePlayback()
             let p = try AVAudioPlayer(data: data)
             p.delegate = self
             guard p.play() else { return false }
@@ -253,8 +256,7 @@ final class Speaker: NSObject, ObservableObject, AVSpeechSynthesizerDelegate, AV
     private func system(_ plain: String) {
         let utterance = AVSpeechUtterance(string: plain)
         utterance.voice = AVSpeechSynthesisVoice(language: "zh-CN")
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
-        try? AVAudioSession.sharedInstance().setActive(true)
+        try? AudioGate.preparePlayback()
         synth.speak(utterance)
         speaking = true
     }

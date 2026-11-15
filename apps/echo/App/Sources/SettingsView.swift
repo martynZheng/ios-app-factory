@@ -8,6 +8,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     @AppStorage("capturePaused") private var capturePaused = false
+    @AppStorage("voiceAnalysis") private var voiceAnalysis = true
     @AppStorage("speechLocale") private var speechLocale = "zh-CN"
     @AppStorage("allowServerSpeech") private var allowServerSpeech = false
     @AppStorage("vocab") private var vocab = ""
@@ -72,10 +73,13 @@ struct SettingsView: View {
             Toggle("暂停采集", isOn: $capturePaused)
                 .onChange(of: capturePaused) { _, paused in sync.pushCapturePaused(paused) }
             LabeledContent("Apple Watch", value: sync.watchStatus)
+            RelayCard().listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
+            NavigationLink { VoiceListView() } label: { Label("声音：我和认识的人", systemImage: "person.wave.2") }
+            Toggle("分辨谁在说话、过滤背景声", isOn: $voiceAnalysis)
         } header: {
             Text("采集")
         } footer: {
-            Text("暂停后，手表上的「开始录音」会被禁用，直到你在这里恢复。录音只能由你在手表上手动开始，期间手表会显示系统麦克风指示。请只在在场的人知情并同意时录音。")
+            Text("暂停后，手表上的「开始录音」会被禁用，直到你在这里恢复。录音只能由你在手表上手动开始，期间手表会显示系统麦克风指示。\n手机接力：要你在手机上点一次“开启”（iOS 不允许在后台自己打开麦克风）。之后手表在录时手机只待命、不保存；手表没电、停了或三分钟没信号，手机接着录并发通知，手表恢复后自动交回。接力期间手机会一直显示橙色的麦克风指示，比较耗电，没有电的时候记得关。\n分辨谁在说话：在本机用声纹区分你和别人，并用系统的声音分类认出电视、音乐和远处的背景人声，整理时不会把它们当成你的事。音频不离开手机。\n请只在在场的人知情并同意时录音。")
         }
     }
 

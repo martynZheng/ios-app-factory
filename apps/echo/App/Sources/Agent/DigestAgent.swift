@@ -25,6 +25,8 @@ enum DigestAgent {
       summary 1–2 句；points 最多 4 条具体信息点；sources 是这一章的行号。第一章如果是【上一章】的继续，continues 设 true。
     - todos 只收明确需要我或在场具体某人会后去做的事；decisions 只收明确定下来的事；pending 只收需要我后续确认的具体问题（最多 2 条）。
       旁听别人演讲、背景声音里的话，都不是我的待办。owner、due 必须是原文里出现的词，否则 null。
+    - 行首如果标了说话人：[我] 是我说的；[某人]/[说话人 X] 是别人；[背景] 是远处、不是在跟我说的人声；[电视/音乐] 是媒体里的声音。
+      [背景] 和 [电视/音乐] 的内容不要当成我的事，不要从里面提待办和决定；没有标的行照常判断。
     - 所有 sources 只能用【本段转写】的行号。看不懂的碎片忽略，宁缺毋滥，不得编造原文没有的事实。
     """
 
@@ -150,7 +152,8 @@ enum DigestAgent {
             default: break
             }
         }
-        let rows = chunk.enumerated().map { "[\($0.offset)] \(clock.string(from: $0.element.time)) \($0.element.text)" }.joined(separator: "\n")
+        let voice = VoiceAnalyzer.shared
+        let rows = chunk.enumerated().map { "[\($0.offset)] \(clock.string(from: $0.element.time)) \(voice.prefix($0.element))\($0.element.text)" }.joined(separator: "\n")
         let prompt = (contextNote.isEmpty ? "" : contextNote + "\n\n") +
             "【本段转写】\(clock.string(from: first))–\(clock.string(from: last))，共 \(chunk.count) 行\n" + rows
         _ = try await Brain.run(system: system, tools: tools, thinking: nil, prompt: prompt, maxTurns: 7, web: false, onEvent: onEvent)

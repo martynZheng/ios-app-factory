@@ -493,7 +493,8 @@ final class DigestCoordinator: ObservableObject {
                             self.agentStatus = text
                         }
                     } else {
-                        let rows = chunk.enumerated().map { "[\($0.offset)] \(time.string(from: $0.element.time)) \($0.element.text)" }.joined(separator: "\n")
+                        let voice = VoiceAnalyzer.shared
+                        let rows = chunk.enumerated().map { "[\($0.offset)] \(time.string(from: $0.element.time)) \(voice.prefix($0.element))\($0.element.text)" }.joined(separator: "\n")
                         let situation = await sensor.describe(from: chunk.first!.time.addingTimeInterval(-300), to: chunk.last!.time.addingTimeInterval(60))
                         let prompt = (ctx.isEmpty ? "" : ctx + "\n\n") + (situation.isEmpty ? "" : "【情境】\n\(situation)\n\n") + "【本段转写】\n" + rows
                         let raw = try await DigestEngine.respond(engine: engine, prompt: prompt)

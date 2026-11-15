@@ -65,6 +65,7 @@ final class Recorder: NSObject, ObservableObject {
         finishSegment(discard: false)
         deactivate()
         state = .paused
+        Sync.shared.heartbeat(recording: false, reason: "stopped")
         Nudges.shared.paused()
         WKInterfaceDevice.current().play(.click)
     }
@@ -80,6 +81,8 @@ final class Recorder: NSObject, ObservableObject {
         if state == .recording { finishSegment(discard: false) }
         deactivate()
         state = .idle
+        let battery = WKInterfaceDevice.current().batteryLevel
+        Sync.shared.heartbeat(recording: false, reason: battery >= 0 && battery < 0.12 ? "lowBattery" : "stopped")
         Nudges.shared.clearRuntime()
         WKInterfaceDevice.current().play(.stop)
     }
@@ -134,6 +137,7 @@ final class Recorder: NSObject, ObservableObject {
             segmentStart = Date()
             voicedSeconds = 0
             state = .recording
+            if index == 0 || haptic != nil { Sync.shared.heartbeat(recording: true) }
             Nudges.shared.armWatchdog()
             startTimer()
             if let haptic { WKInterfaceDevice.current().play(haptic) }
@@ -191,6 +195,7 @@ final class Recorder: NSObject, ObservableObject {
             beginSegment(haptic: nil)
             return
         }
+        if ticks % 240 == 0 { Sync.shared.heartbeat(recording: true) }   // 约每分钟一次心跳
         if ticks % 40 == 0 { // 约每 10 秒检查一次电量和空间
             let battery = WKInterfaceDevice.current().batteryLevel
             if battery >= 0, battery < 0.10 {
