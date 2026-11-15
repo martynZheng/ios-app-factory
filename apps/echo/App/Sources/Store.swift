@@ -92,22 +92,36 @@ final class Store: ObservableObject {
     static let isDemo = UserDefaults.standard.bool(forKey: "demo")
 
     @Published private(set) var db = DB() {
-        didSet { index = nil }
+        didSet {
+            // 句子没动（只改了分段状态、回顾等）就不用重建句子那一半索引：几万句排序很贵，转写时分段状态变得很频繁
+            let same = oldValue.lines.count == db.lines.count &&
+                oldValue.lines.withUnsafeBufferPointer { a in db.lines.withUnsafeBufferPointer { b in a.baseAddress == b.baseAddress } }
+            if !same { lineIndex = nil; linesRevision &+= 1 }
+            index = nil
+        }
     }
 
+    /// 句子变了就加一（界面据此决定要不要重新分组）
+    private(set) var linesRevision = 0
+
     /// 查询索引：db 一变就作废，下次用到时重建。避免每次刷新界面都全表扫描、逐句格式化日期。
-    private final class Index {
+    private final class LineIndex {
         var linesByDay: [String: [Line]] = [:]
-        var segmentsByDay: [String: [Segment]] = [:]
         var lineByID: [UUID: Line] = [:]
-        var segmentByID: [String: Segment] = [:]
         var allLines: [Line] = []
+        var days: [String] = []
+    }
+    private var lineIndex: LineIndex?
+
+    private final class Index {
+        var segmentsByDay: [String: [Segment]] = [:]
+        var segmentByID: [String: Segment] = [:]
     }
     private var index: Index?
 
-    private var idx: Index {
-        if let index { return index }
-        let i = Index()
+    private var lidx: LineIndex {
+        if let lineIndex { return lineIndex }
+        let i = LineIndex()
         let cal = Calendar.current
         var keyCache: [Date: String] = [:]
         func key(_ date: Date) -> String {
@@ -122,6 +136,23 @@ final class Store: ObservableObject {
             i.linesByDay[key(line.time), default: []].append(line)
             i.lineByID[line.id] = line
         }
+        i.days = i.linesByDay.keys.sorted()
+        lineIndex = i
+        return i
+    }
+
+    private var idx: Index {
+        if let index { return index }
+        let i = Index()
+        let cal = Calendar.current
+        var keyCache: [Date: String] = [:]
+        func key(_ date: Date) -> String {
+            let d = cal.startOfDay(for: date)
+            if let k = keyCache[d] { return k }
+            let k = Store.dayKey(d)
+            keyCache[d] = k
+            return k
+        }
         for seg in db.segments {
             i.segmentsByDay[key(seg.start), default: []].append(seg)
             i.segmentByID[seg.id] = seg
@@ -131,7 +162,9 @@ final class Store: ObservableObject {
     }
 
     /// 全部转写，按时间排序。
-    var sortedLines: [Line] { idx.allLines }
+    var sortedLines: [Line] { lidx.allLines }
+    /// 有转写的日子，从早到晚。
+    var lineDays: [String] { lidx.days }
     let audioDir: URL
     private let dbURL: URL
     private var saveScheduled = false
@@ -161,28 +194,46 @@ final class Store: ObservableObject {
         change(&db)
         guard !saveScheduled else { return }
         saveScheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.saveNow() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.saveInBackground() }
     }
 
+    /// 编码几万句的 JSON 很慢，别在主线程做（主线程一卡，翻页就掉帧）。
+    private let saveQueue = DispatchQueue(label: "store.save", qos: .utility)
+    private func saveInBackground() {
+        saveScheduled = false
+        guard !Store.isDemo else { return }
+        let snapshot = db
+        let url = dbURL
+        saveQueue.async {
+            guard let data = try? JSONEncoder().encode(snapshot) else { return }
+            try? data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        }
+    }
+
+    /// 马上存（进后台时）。和后台保存走同一个队列，保证不会被更旧的快照覆盖。
     func saveNow() {
         saveScheduled = false
         guard !Store.isDemo else { return }
-        guard let data = try? JSONEncoder().encode(db) else { return }
-        try? data.write(to: dbURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        let snapshot = db
+        let url = dbURL
+        saveQueue.sync {
+            guard let data = try? JSONEncoder().encode(snapshot) else { return }
+            try? data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        }
     }
 
     // MARK: 查询
 
     func audioURL(_ segmentID: String) -> URL { audioDir.appendingPathComponent(segmentID + ".m4a") }
     func segment(_ id: String) -> Segment? { idx.segmentByID[id] }
-    func line(_ id: UUID) -> Line? { idx.lineByID[id] }
+    func line(_ id: UUID) -> Line? { lidx.lineByID[id] }
 
-    func lines(on day: String) -> [Line] { idx.linesByDay[day] ?? [] }
+    func lines(on day: String) -> [Line] { lidx.linesByDay[day] ?? [] }
 
     func segments(on day: String) -> [Segment] { idx.segmentsByDay[day] ?? [] }
 
     /// 有记录的日子，新的在前。
-    var days: [String] { idx.linesByDay.keys.sorted(by: >) }
+    var days: [String] { lidx.days.reversed() }
 
     var storageBytes: Int64 {
         let files = (try? FileManager.default.contentsOfDirectory(at: audioDir, includingPropertiesForKeys: [.fileSizeKey])) ?? []

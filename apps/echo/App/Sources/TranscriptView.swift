@@ -13,6 +13,9 @@ struct TranscriptView: View {
     @State private var speakerDraft = ""
     @State private var topVisible = true
     @State private var bottomVisible = true
+    /// 只画最近几天：一次把几个月几万句都交给界面，滚动和刷新都会卡住
+    @State private var dayLimit = 3
+    private static let searchLimit = 300
 
     private struct Cluster: Identifiable {
         let id: UUID
@@ -32,9 +35,20 @@ struct TranscriptView: View {
     }()
 
     /// 按天分组，再把间隔不超过 90 秒、同一次录音的句子并成一簇。
+    /// 还有多少天没画出来
+    private var hiddenDays: Int {
+        query.trimmingCharacters(in: .whitespaces).isEmpty ? max(0, store.lineDays.count - dayLimit) : 0
+    }
+
     private var days: [Day] {
         let q = query.trimmingCharacters(in: .whitespaces)
-        let all = q.isEmpty ? store.sortedLines : store.sortedLines.filter { $0.text.localizedCaseInsensitiveContains(q) }
+        let all: [Line]
+        if q.isEmpty {
+            all = store.lineDays.suffix(dayLimit).flatMap { store.lines(on: $0) }
+        } else {
+            // 搜索看全部，但只列最近的若干条
+            all = Array(store.sortedLines.filter { $0.text.localizedCaseInsensitiveContains(q) }.suffix(Self.searchLimit))
+        }
         var result: [Day] = []
         var dayKey = ""
         var clusters: [Cluster] = []
@@ -75,6 +89,22 @@ struct TranscriptView: View {
                             .onAppear { topVisible = true }
                             .onDisappear { topVisible = false }
                         banners
+                        if hiddenDays > 0 {
+                            Button {
+                                let anchor = groups.first.map { "day-" + $0.id }
+                                dayLimit += 3
+                                if let anchor {
+                                    DispatchQueue.main.async { proxy.scrollTo(anchor, anchor: .top) }
+                                }
+                            } label: {
+                                Label("看更早的（还有 \(hiddenDays) 天）", systemImage: "arrow.up")
+                                    .font(.footnote)
+                                    .foregroundStyle(Ink.ink2)
+                            }
+                            .buttonStyle(.plain)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 10)
+                        }
                         if groups.isEmpty {
                             emptyState.padding(.top, 80)
                         }
@@ -94,7 +124,6 @@ struct TranscriptView: View {
                             .onDisappear { bottomVisible = false }
                     }
                     .padding(.horizontal, 12)
-                    .animation(.spring(response: 0.45, dampingFraction: 0.86), value: store.db.lines.count)
                 }
                 .defaultScrollAnchor(.bottom)
                 .scrollDismissesKeyboard(.interactively)
@@ -105,12 +134,18 @@ struct TranscriptView: View {
                     .padding(.bottom, 12)
                 }
                 .toolbar {
-                    if groups.count > 1 {
+                    if store.lineDays.count > 1 {
                         ToolbarItem(placement: .topBarLeading) {
                             Menu {
-                                ForEach(groups.reversed()) { day in
-                                    Button(dayLabel(day.id)) {
-                                        withAnimation(.smooth(duration: 0.5)) { proxy.scrollTo("day-" + day.id, anchor: .top) }
+                                ForEach(Array(store.lineDays.suffix(60).reversed()), id: \.self) { key in
+                                    Button(dayLabel(key)) {
+                                        // 那天还没画出来就先把它加进来，再滚过去
+                                        if let i = store.lineDays.firstIndex(of: key) {
+                                            dayLimit = max(dayLimit, store.lineDays.count - i)
+                                        }
+                                        DispatchQueue.main.async {
+                                            withAnimation(.smooth(duration: 0.5)) { proxy.scrollTo("day-" + key, anchor: .top) }
+                                        }
                                     }
                                 }
                             } label: {
