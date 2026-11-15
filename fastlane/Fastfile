@@ -40,6 +40,23 @@ platform :ios do
       | xcbeautify
     ].join(" "))
 
+    # 第三方二进制框架（如 SPM 里的 onnxruntime.framework）的 Info.plist 常常没写或写错 MinimumOSVersion，
+    # 苹果处理时会以 ITMS-90208 拒掉整个版本（上传显示成功，TestFlight 里却不出现）。
+    # 统一改成和 App 一样，改完下面导出时会重新签名。
+    app_for_plist = Dir[File.join(archive, "Products", "Applications", "*.app")].first
+    if app_for_plist
+      app_min = sh("/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' #{File.join(app_for_plist, 'Info.plist').shellescape} 2>/dev/null || true").strip
+      unless app_min.empty?
+        Dir[File.join(app_for_plist, "Frameworks", "*.framework", "Info.plist")].each do |plist|
+          q = plist.shellescape
+          old = sh("/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' #{q} 2>/dev/null || true").strip
+          next if old == app_min
+          UI.message("#{File.basename(File.dirname(plist))}: MinimumOSVersion #{old.empty? ? '(无)' : old} → #{app_min}")
+          sh("/usr/libexec/PlistBuddy -c 'Set :MinimumOSVersion #{app_min}' #{q} 2>/dev/null || /usr/libexec/PlistBuddy -c 'Add :MinimumOSVersion string #{app_min}' #{q}")
+        end
+      end
+    end
+
     # 不签名的 archive 里不带 entitlements，导出时的云端签名就不知道 App 要 HealthKit 等特殊能力。
     # 有 App/App.entitlements（XcodeGen 按 project.yml 生成）时，先用 ad-hoc 签名把它写进 App；
     # 导出时会读这份 entitlements，为它申请带对应能力的描述文件并重新签名。嵌套的 App（手表）先签，外层后签。
