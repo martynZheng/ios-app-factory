@@ -119,11 +119,12 @@ Sync      outbox 落盘 + transferFile  ──▶  Store        JSON 库 + 音�
 手表每分钟发一次心跳（WCSession sendMessage，送不到就 transferUserInfo），收到的录音分段也算心跳。接力期间系统一直显示橙色麦克风指示。
 需要 UIBackgroundModes: audio。朗读、回听、语音输入通过 AudioGate 共用录音会话，不会把接力的麦克风停掉。
 
-## 谁在说话（Voice/VoiceEncoder.swift、VoiceAnalyzer.swift）
+## 谁在说话（Voice/VoiceModels.swift、VoiceAnalyzer.swift）
 
-本机运行，音频不出手机：
+本机运行（ONNX Runtime），音频不出手机：
 - 声音分类：系统 SoundAnalysis 自带分类器（version1），每 0.5 秒判断人声 / 电视音乐 / 其他。
-- 声纹：Resemblyzer 的 GE2E 编码器（Apache 2.0，`voice/LICENSE-Resemblyzer`），权重由 `voice/export.py` 导出成 `App/Resources/ge2e.bin`（5.7 MB），Swift 用 Accelerate 跑 3 层 LSTM。
-  `voice/ge2e.py` 是不依赖 PyTorch 的 numpy 参考实现，Swift 逐行对应。实测（DeepSeek 合成的两种声音）：同环境下同一人 0.84–0.96、不同人 0.43–0.63；远场混响下同一人最低 0.68。
-- 认人：“我”的声纹按设备分开存（手表、手机的麦克风不同）；设置里录 20 秒建立，之后高置信度的片段自动校准。其他声音在线聚类成“说话人 A/B…”，可以起名字，起了名字的长期认得。
-- 关注度：我 / 近处（音量接近我说话的音量）/ 背景（远、小声）/ 电视音乐。整理、记忆里的原话带 [我] [某人] [背景] [电视/音乐] 前缀，背景和媒体里的话不提待办。
+- 分段：pyannote segmentation-3.0（MIT），10 秒一窗、步长 5 秒，每窗最多 3 个局部说话人，能标出两人同时说话。
+- 声纹：3D-Speaker CAM++ 中英文增强版（Apache 2.0），输入 80 维 Kaldi Fbank。每窗每个局部说话人取单独在说的部分算声纹。
+- 认人：“我”的声纹按设备分开存（手表、手机）；设置里录 20 秒建立，之后高置信度的自动校准。其他声音在线聚类成“说话人 A/B…”，可以起名字。
+- 关注度：我 / 近处 / 背景 / 电视音乐。整理、记忆里的原话带 [我] [某人] [背景] [电视/音乐] 前缀。
+- 模型来源、参考实现和测试结果见 `voice/README.md`。换模型时改 `VoiceAnalyzer.engine`，旧声纹会自动清掉重来。

@@ -13,6 +13,10 @@ settings:
     CURRENT_PROJECT_VERSION: "1"
     DEVELOPMENT_TEAM: ${APPLE_TEAM_ID}
     CODE_SIGN_STYLE: Automatic
+packages:
+  onnxruntime:
+    url: https://github.com/microsoft/onnxruntime-swift-package-manager
+    exactVersion: 1.24.2
 targets:
   App:
     type: application
@@ -28,6 +32,8 @@ targets:
       - path: Shared
     dependencies:
       - target: WatchApp
+      - package: onnxruntime
+        product: onnxruntime
     info:
       path: App/Info.plist
       properties:

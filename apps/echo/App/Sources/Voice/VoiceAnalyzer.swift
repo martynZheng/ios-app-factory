@@ -7,7 +7,8 @@ import SwiftUI
 //
 // 每段录音转写完以后，在本机做三件事：
 // 1. 声音分类（系统自带的 SoundAnalysis 分类器，300 多类）：每 0.5 秒判断是人声、电视音乐，还是环境噪声。
-// 2. 声纹（VoiceEncoder，GE2E）：人声部分每 0.8 秒取一个 1.6 秒的片段算声纹向量。
+// 2. 谁在什么时候说话（pyannote 分段，10 秒一窗、步长 5 秒）：每窗最多分出 3 个“局部说话人”，能看出两人同时在说。
+//    每个局部说话人取他单独在说的声音拼起来，算 CAM++ 声纹；
 //    先和“我”的声纹比（手表、手机各存一份，因为两种麦克风听到的同一个人不一样），像就是我；
 //    不像就在“认识的声音”里找最像的人，都不像就记成一个新的声音（说话人 A、B……），你可以给它起名字。
 // 3. 关注度：结合音量判断——我说的、近处在跟我说话的人、远处背景里的人声、电视音乐。
@@ -27,6 +28,8 @@ struct SpeakerProfile: Codable, Identifiable {
 }
 
 struct VoiceBook: Codable {
+    /// 声纹模型；换了模型以后旧的向量不能比，要清掉重来
+    var engine: String? = nil
     /// 我的声纹，按设备分开（watch / phone）
     var me: [String: [Float]] = [:]
     /// 我说话时的典型音量（dBFS），按设备
@@ -43,11 +46,12 @@ final class VoiceAnalyzer: ObservableObject {
     @Published private(set) var busy = false
     private let fileURL: URL
 
-    /// 同一台设备上“是我”的门槛；跨设备（只有另一台设备的声纹时）放低一些
-    static let meThreshold: Float = 0.74
-    static let meCrossThreshold: Float = 0.66
+    static let engine = "campplus-v1"
+    /// CAM++ 的门槛（实测同一人 ≥ 0.49、不同人 ≤ 0.35）。同一台设备上“是我”；跨设备（只有另一台设备的声纹时）放低一些
+    static let meThreshold: Float = 0.52
+    static let meCrossThreshold: Float = 0.46
     /// 归到已有的某个人
-    static let speakerThreshold: Float = 0.76
+    static let speakerThreshold: Float = 0.50
 
     static var enabled: Bool { UserDefaults.standard.object(forKey: "voiceAnalysis") as? Bool ?? true }
 
@@ -56,6 +60,12 @@ final class VoiceAnalyzer: ObservableObject {
         fileURL = base.appendingPathComponent("voices.json")
         if !Store.isDemo, let data = try? Data(contentsOf: fileURL), let saved = try? JSONDecoder().decode(VoiceBook.self, from: data) {
             book = saved
+        }
+        if !Store.isDemo, book.engine != Self.engine {
+            // 换了声纹模型：旧的向量没法比，清掉；以前分析过的重新分析
+            book = VoiceBook(engine: Self.engine)
+            save()
+            Store.shared.mutate { db in for i in db.segments.indices { db.segments[i].voice = nil } }
         }
         if Store.isDemo {
             book.speakers = [SpeakerProfile(id: "demo-a", name: "二号选手", centroid: [], count: 20, firstSeen: Date(), lastSeen: Date(), letter: "A"),
@@ -108,7 +118,7 @@ final class VoiceAnalyzer: ObservableObject {
 
     /// 转写完、还没分析过的分段，一段一段做（在后台线程算）。
     func kick() {
-        guard Self.enabled, !busy, !Store.isDemo, VoiceEncoder.shared != nil else { return }
+        guard Self.enabled, !busy, !Store.isDemo, SpeakerEmbedder.shared != nil, SpeakerSegmenter.shared != nil else { return }
         let store = Store.shared
         guard let seg = store.db.segments.sorted(by: { $0.start < $1.start }).first(where: {
             $0.status == .done && $0.voice != true && $0.hasAudio
@@ -126,22 +136,28 @@ final class VoiceAnalyzer: ObservableObject {
 
     // MARK: 第一步：在后台线程把声音量出来
 
-    struct Window {
-        var start: Double
-        var end: Double
-        var level: Float
-        var speech: Float
-        var media: Float
+    /// 一窗里的一个局部说话人
+    struct LocalSpeaker {
         var embedding: [Float]?
+        var level: Float
+    }
+
+    /// 一窗：起点（采样）、每帧 3 个局部说话人是否在说、他们各自的声纹
+    struct Chunk {
+        var start: Int
+        var frames: Int
+        var active: [Bool]
+        var speakers: [LocalSpeaker]
     }
 
     struct Measurement {
-        var windows: [Window]
+        var chunks: [Chunk]
+        var classes: [(Double, Double, Float, Float)]   // 声音分类：起止、人声、电视音乐
         var duration: Double
     }
 
     private final class ClassObserver: NSObject, SNResultsObserving {
-        var items: [(Double, Double, Float, Float)] = []   // 起止、人声置信度、电视音乐置信度
+        var items: [(Double, Double, Float, Float)] = []
         private static let speechWords = ["speech", "conversation", "whisper", "shout", "yell", "babble", "laughter", "chatter", "narration"]
         private static let mediaWords = ["music", "singing", "television", "radio", "song", "guitar", "piano", "drum", "orchestra", "choir", "rapping", "dj"]
         func request(_ request: SNRequest, didProduce result: SNResult) {
@@ -158,48 +174,66 @@ final class VoiceAnalyzer: ObservableObject {
     }
 
     nonisolated static func measure(url: URL) -> Measurement? {
-        guard let encoder = VoiceEncoder.shared, let wav = VoiceEncoder.loadMono16k(url), wav.count > 16_000 else { return nil }
-        let duration = Double(wav.count) / Double(VoiceEncoder.sampleRate)
-        // 声音分类
+        guard let embedder = SpeakerEmbedder.shared, let segmenter = SpeakerSegmenter.shared,
+              let wav = Audio16k.load(url), wav.count > 8_000 else { return nil }
+        let n = wav.count
         let observer = ClassObserver()
         if let analyzer = try? SNAudioFileAnalyzer(url: url), let request = try? SNClassifySoundRequest(classifierIdentifier: .version1) {
             request.overlapFactor = 0.5
             if (try? analyzer.add(request, withObserver: observer)) != nil { analyzer.analyze() }
         }
-        let classes = observer.items
-        // 声纹
-        let (frames, mel) = encoder.melSpectrogram(wav)
-        var windows: [Window] = []
-        var s = 0
-        while s + VoiceEncoder.window <= frames {
-            let t0 = Double(s) * 0.01, t1 = t0 + 1.6
-            let level = VoiceEncoder.dBFS(wav, from: s * VoiceEncoder.hop, to: (s + VoiceEncoder.window) * VoiceEncoder.hop)
-            var speech: Float = 0, media: Float = 0, n: Float = 0
-            for c in classes where c.1 > t0 && c.0 < t1 {
-                speech += c.2
-                media += c.3
-                n += 1
-            }
-            if n > 0 { speech /= n; media /= n } else { speech = level > -45 ? 0.5 : 0 }
-            var w = Window(start: t0, end: t1, level: level, speech: speech, media: media, embedding: nil)
-            // 只给像人声、而且不是太小声的片段算声纹
-            if speech >= 0.3, level > -52 {
-                let gain = level < -30 ? powf(10, (-30 - level) / 20) : 1
-                w.embedding = encoder.embed(mel: mel, start: s, gain: gain)
-            }
-            windows.append(w)
-            s += 80
+        let window = SpeakerSegmenter.window, step = window / 2
+        var starts: [Int] = [0]
+        if n > window {
+            starts = Array(stride(from: 0, to: n - window + step, by: step))
         }
-        return Measurement(windows: windows, duration: duration)
+        var chunks: [Chunk] = []
+        for s in starts {
+            guard let result = segmenter.run(wav, from: s) else { continue }
+            let frames = result.0, act = result.1
+            var speakers: [LocalSpeaker] = []
+            for k in 0..<3 {
+                // 他单独在说的帧（不和别人重叠），拼起来算声纹
+                var pieces: [(Int, Int)] = []
+                var aloneFrames = 0
+                for t in 0..<frames {
+                    let others = (0..<3).filter { $0 != k && act[t * 3 + $0] }.count
+                    if act[t * 3 + k] && others == 0 {
+                        let a = s + t * SpeakerSegmenter.shift
+                        let b = min(a + SpeakerSegmenter.shift, n)
+                        if b > a {
+                            if let last = pieces.last, last.1 == a { pieces[pieces.count - 1].1 = b } else { pieces.append((a, b)) }
+                            aloneFrames += 1
+                        }
+                    }
+                }
+                let seconds = Double(aloneFrames * SpeakerSegmenter.shift) / 16_000
+                guard seconds >= 0.8 else {
+                    speakers.append(LocalSpeaker(embedding: nil, level: -120))
+                    continue
+                }
+                var ms: Float = 0
+                var count = 0
+                for (a, b) in pieces {
+                    let db = Audio16k.dBFS(wav, from: a, to: b)
+                    ms += powf(10, db / 10) * Float(b - a)
+                    count += b - a
+                }
+                let level = 10 * log10f(max(ms / Float(max(count, 1)), 1e-12))
+                speakers.append(LocalSpeaker(embedding: embedder.embed(pieces: pieces, of: wav), level: level))
+            }
+            chunks.append(Chunk(start: s, frames: frames, active: act, speakers: speakers))
+        }
+        return Measurement(chunks: chunks, classes: observer.items, duration: Double(n) / 16_000)
     }
 
     // MARK: 第二步：认人、给每句打标签
 
     private func meSimilarity(_ e: [Float], device: String) -> Float? {
-        if let mine = book.me[device] { return VoiceEncoder.cosine(e, mine) }
+        if let mine = book.me[device] { return Audio16k.cosine(e, mine) }
         if let other = book.me.values.first {
             // 只有另一台设备的声纹：放宽门槛（换算到同一刻度）
-            return VoiceEncoder.cosine(e, other) + (Self.meThreshold - Self.meCrossThreshold)
+            return Audio16k.cosine(e, other) + (Self.meThreshold - Self.meCrossThreshold)
         }
         return nil
     }
@@ -207,13 +241,13 @@ final class VoiceAnalyzer: ObservableObject {
     private func assignSpeaker(_ e: [Float], at time: Date) -> String {
         var best: (Int, Float)?
         for (i, p) in book.speakers.enumerated() where !p.centroid.isEmpty {
-            let sim = VoiceEncoder.cosine(e, p.centroid)
+            let sim = Audio16k.cosine(e, p.centroid)
             if sim > (best?.1 ?? -1) { best = (i, sim) }
         }
         if let (i, sim) = best, sim >= Self.speakerThreshold {
             var p = book.speakers[i]
             let w = 1 / Float(min(p.count + 1, 50))
-            p.centroid = VoiceEncoder.normalized(zip(p.centroid, e).map { $0 * (1 - w) + $1 * w }) ?? p.centroid
+            p.centroid = Audio16k.normalized(zip(p.centroid, e).map { $0 * (1 - w) + $1 * w }) ?? p.centroid
             p.count += 1
             p.lastSeen = time
             book.speakers[i] = p
@@ -234,18 +268,39 @@ final class VoiceAnalyzer: ObservableObject {
             return
         }
         let device = Self.device(of: segment.id)
-        // 每个片段：是我 / 某个人
-        var who: [Int: String] = [:]
-        for (i, w) in m.windows.enumerated() {
-            guard let e = w.embedding else { continue }
-            let time = segment.start.addingTimeInterval(w.start)
-            if let sim = meSimilarity(e, device: device), sim >= Self.meThreshold {
-                who[i] = "me"
-                // 很确定是我、而且是近处的声音：慢慢校准这台设备上的“我”
-                if sim >= Self.meThreshold + 0.06 { learnMe(e, level: w.level, device: device) }
-            } else {
-                who[i] = assignSpeaker(e, at: time)
+        // 每窗每个局部说话人：是我 / 某个人
+        var labels: [[String?]] = []
+        for chunk in m.chunks {
+            var row: [String?] = []
+            for sp in chunk.speakers {
+                guard let e = sp.embedding else { row.append(nil); continue }
+                let time = segment.start.addingTimeInterval(Double(chunk.start) / 16_000)
+                if let sim = meSimilarity(e, device: device), sim >= Self.meThreshold {
+                    row.append("me")
+                    if sim >= Self.meThreshold + 0.1 { learnMe(e, level: sp.level, device: device) }
+                } else {
+                    row.append(assignSpeaker(e, at: time))
+                }
             }
+            labels.append(row)
+        }
+        // 每 0.1 秒：取离窗中心最近的那一窗，看谁在说
+        func speakersAt(_ t: Double) -> [(String, Float)] {
+            guard !m.chunks.isEmpty else { return [] }
+            var best = 0
+            for i in m.chunks.indices {
+                let center = (Double(m.chunks[i].start) + Double(SpeakerSegmenter.window) / 2) / 16_000
+                let bestCenter = (Double(m.chunks[best].start) + Double(SpeakerSegmenter.window) / 2) / 16_000
+                if abs(center - t) < abs(bestCenter - t) { best = i }
+            }
+            let chunk = m.chunks[best]
+            let f = Int((t * 16_000 - Double(chunk.start) - Double(SpeakerSegmenter.field) / 2) / Double(SpeakerSegmenter.shift))
+            guard f >= 0, f < chunk.frames else { return [] }
+            var out: [(String, Float)] = []
+            for k in 0..<3 where chunk.active[f * 3 + k] {
+                if let id = labels[best][k] { out.append((id, chunk.speakers[k].level)) }
+            }
+            return out
         }
         let myLevel = book.meLevel[device] ?? -30
         var updated: [Line] = []
@@ -253,13 +308,19 @@ final class VoiceAnalyzer: ObservableObject {
             let a = line.offset
             let b = k + 1 < lines.count ? max(lines[k + 1].offset, a + 0.5) : min(m.duration, a + 8)
             var votes: [String: Double] = [:]
-            var level: Float = -120, speech: Float = 0, media: Float = 0, n: Float = 0
-            for (i, w) in m.windows.enumerated() where w.end > a && w.start < b {
-                let overlap = min(w.end, b) - max(w.start, a)
-                if let id = who[i] { votes[id, default: 0] += overlap }
-                level = max(level, w.level)
-                speech += w.speech
-                media += w.media
+            var level: Float = -120
+            var t = a
+            while t < b {
+                for (id, lv) in speakersAt(t) {
+                    votes[id, default: 0] += 0.1
+                    level = max(level, lv)
+                }
+                t += 0.1
+            }
+            var speech: Float = 0, media: Float = 0, n: Float = 0
+            for c in m.classes where c.1 > a && c.0 < b {
+                speech += c.2
+                media += c.3
                 n += 1
             }
             if n > 0 { speech /= n; media /= n }
@@ -269,9 +330,9 @@ final class VoiceAnalyzer: ObservableObject {
                 l.zone = "media"
             } else if l.speaker == "me" {
                 l.zone = "me"
-            } else if level >= max(-40, myLevel - 14) {
+            } else if l.speaker != nil && level >= max(-42, myLevel - 14) {
                 l.zone = "near"
-            } else if n > 0 {
+            } else if l.speaker != nil || speech > 0.3 {
                 l.zone = "far"
             }
             updated.append(l)
@@ -293,7 +354,7 @@ final class VoiceAnalyzer: ObservableObject {
         let n = book.meSamples[device] ?? 0
         if let old = book.me[device] {
             let w: Float = 1 / Float(min(n + 1, 200))
-            book.me[device] = VoiceEncoder.normalized(zip(old, e).map { $0 * (1 - w) + $1 * w }) ?? old
+            book.me[device] = Audio16k.normalized(zip(old, e).map { $0 * (1 - w) + $1 * w }) ?? old
         } else {
             book.me[device] = e
         }
@@ -319,21 +380,8 @@ final class VoiceAnalyzer: ObservableObject {
         let next = lines.first(where: { $0.offset > line.offset })?.offset ?? (line.offset + 6)
         let a = line.offset, b = max(next, a + 1.6)
         return await Task.detached(priority: .userInitiated) { () -> [Float]? in
-            guard let encoder = VoiceEncoder.shared, let wav = VoiceEncoder.loadMono16k(url) else { return nil }
-            let (frames, mel) = encoder.melSpectrogram(wav)
-            var sum = [Float](repeating: 0, count: VoiceEncoder.hidden)
-            var count = 0
-            var s = Int(a * 100)
-            while s + VoiceEncoder.window <= min(frames, Int(b * 100) + 40) {
-                let level = VoiceEncoder.dBFS(wav, from: s * VoiceEncoder.hop, to: (s + VoiceEncoder.window) * VoiceEncoder.hop)
-                let gain = level < -30 ? powf(10, (-30 - level) / 20) : 1
-                if let e = encoder.embed(mel: mel, start: s, gain: gain) {
-                    for i in 0..<sum.count { sum[i] += e[i] }
-                    count += 1
-                }
-                s += 80
-            }
-            return count > 0 ? VoiceEncoder.normalized(sum) : nil
+            guard let embedder = SpeakerEmbedder.shared, let wav = Audio16k.load(url) else { return nil }
+            return embedder.embed(wav, from: Int(a * 16_000), to: Int(b * 16_000))
         }.value
     }
 
@@ -361,7 +409,7 @@ final class VoiceAnalyzer: ObservableObject {
             // 同名的合并成一个人
             if let j = book.speakers.firstIndex(where: { $0.name == clean && $0.id != id }) {
                 let keep = book.speakers[j].id
-                book.speakers[j].centroid = VoiceEncoder.normalized(zip(book.speakers[j].centroid, book.speakers[i].centroid).map { $0 + $1 }) ?? book.speakers[j].centroid
+                book.speakers[j].centroid = Audio16k.normalized(zip(book.speakers[j].centroid, book.speakers[i].centroid).map { $0 + $1 }) ?? book.speakers[j].centroid
                 book.speakers[j].count += book.speakers[i].count
                 book.speakers.remove(at: i)
                 Store.shared.mutate { db in
@@ -394,29 +442,18 @@ final class VoiceAnalyzer: ObservableObject {
 
     /// 录一段我自己的声音（设置里的“我的声音”）。
     func enroll(samples: [Float], device: String) -> Bool {
-        guard let encoder = VoiceEncoder.shared else { return false }
-        let (frames, mel) = encoder.melSpectrogram(samples)
-        var sum = [Float](repeating: 0, count: VoiceEncoder.hidden)
-        var count = 0
+        guard let embedder = SpeakerEmbedder.shared, let me = embedder.embed(samples) else { return false }
+        book.me[device] = me
+        book.meSamples[device] = 20
+        // 我说话的典型音量：有声部分的中位数
         var levels: [Float] = []
         var s = 0
-        while s + VoiceEncoder.window <= frames {
-            let level = VoiceEncoder.dBFS(samples, from: s * VoiceEncoder.hop, to: (s + VoiceEncoder.window) * VoiceEncoder.hop)
-            if level > -50 {
-                let gain = level < -30 ? powf(10, (-30 - level) / 20) : 1
-                if let e = encoder.embed(mel: mel, start: s, gain: gain) {
-                    for i in 0..<sum.count { sum[i] += e[i] }
-                    count += 1
-                    levels.append(level)
-                }
-            }
-            s += 80
+        while s + 16_000 <= samples.count {
+            let lv = Audio16k.dBFS(samples, from: s, to: s + 16_000)
+            if lv > -50 { levels.append(lv) }
+            s += 8_000
         }
-        guard count >= 5, let me = VoiceEncoder.normalized(sum) else { return false }
-        book.me[device] = me
-        book.meSamples[device] = count
-        book.meLevel[device] = levels.sorted()[levels.count / 2]
-        // 手表上还没有：先用手机的（门槛会放宽），之后用手表录到的声音自己校准
+        if !levels.isEmpty { book.meLevel[device] = levels.sorted()[levels.count / 2] }
         save()
         // 以前分析过的重新分析一遍
         Store.shared.mutate { db in for i in db.segments.indices { db.segments[i].voice = nil } }
@@ -425,7 +462,7 @@ final class VoiceAnalyzer: ObservableObject {
     }
 
     func forgetAll() {
-        book = VoiceBook()
+        book = VoiceBook(engine: Self.engine)
         save()
         Store.shared.mutate { db in
             for i in db.lines.indices { db.lines[i].speaker = nil; db.lines[i].zone = nil }

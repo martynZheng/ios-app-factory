@@ -147,7 +147,7 @@ struct VoiceEnrollView: View {
         working = true
         let file = url
         Task {
-            let samples = await Task.detached { VoiceEncoder.loadMono16k(file) }.value
+            let samples = await Task.detached { Audio16k.load(file) }.value
             try? FileManager.default.removeItem(at: file)
             let ok = samples.map { analyzer.enroll(samples: $0, device: "phone") } ?? false
             working = false

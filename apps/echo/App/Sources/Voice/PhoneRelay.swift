@@ -197,7 +197,7 @@ final class PhoneRelay: NSObject, ObservableObject {
         segmentFrames += AVAudioFramePosition(out.frameLength)
         if let ch = out.floatChannelData {
             let samples = Array(UnsafeBufferPointer(start: ch[0], count: Int(out.frameLength)))
-            if VoiceEncoder.dBFS(samples, from: 0, to: samples.count) > -45 { voicedFrames += AVAudioFramePosition(out.frameLength) }
+            if Audio16k.dBFS(samples, from: 0, to: samples.count) > -45 { voicedFrames += AVAudioFramePosition(out.frameLength) }
         }
         if segmentFrames >= Self.segmentLength {
             closeSegment()
