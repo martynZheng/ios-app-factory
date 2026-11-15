@@ -51,26 +51,36 @@ def wake_message(sc):
     return text + "\n今天还没有提醒过我。"
 
 
-def decide(sc, model):
-    context = f"现在是 2026-11-15 {sc['now']}。最近一小时的情境：" + (f"乘车，已连续 {sc['driving']} 分钟" if sc["driving"] else "静止") + "。今天的日程：没有。待办：没有。"
-    body = {"model": model, "tools": TOOLS,
-            "messages": [{"role": "system", "content": "你是我的常驻助理。\n\n" + context + "\n\n" + rules()},
-                         {"role": "user", "content": wake_message(sc)}]}
-    if model == "deepseek-chat":
-        body.update(temperature=0.7, tool_choice="required")
+def call(body):
     req = urllib.request.Request("https://api.deepseek.com/chat/completions", json.dumps(body).encode(),
                                  {"Content-Type": "application/json", "Authorization": "Bearer " + os.environ["DEEPSEEK_API_KEY"]})
     err = None
-    for _ in range(3):
+    for _ in range(4):
         try:
-            with urllib.request.urlopen(req, timeout=240) as r:
-                msg = json.load(r)["choices"][0]["message"]
-            call = (msg.get("tool_calls") or [{}])[0].get("function", {})
-            return call.get("name", "none"), json.loads(call.get("arguments") or "{}")
+            with urllib.request.urlopen(req, timeout=300) as r:
+                return json.load(r)["choices"][0]["message"]
         except Exception as e:  # noqa
             err = e
-            time.sleep(2)
-    return "error", {"error": str(err)}
+            time.sleep(3)
+    raise RuntimeError(err)
+
+
+def decide(sc, model="deepseek-chat", rule_text=None):
+    context = f"现在是 2026-11-15 {sc['now']}。最近一小时的情境：" + (f"乘车，已连续 {sc['driving']} 分钟" if sc["driving"] else "静止") + "。今天的日程：没有。待办：没有。"
+    body = {"model": model, "tools": TOOLS,
+            "messages": [{"role": "system", "content": "你是我的常驻助理。\n\n" + context + "\n\n" + (rule_text or rules())},
+                         {"role": "user", "content": wake_message(sc)}]}
+    if model == "deepseek-chat":
+        body.update(temperature=0.7, tool_choice="required")
+    try:
+        msg = call(body)
+    except RuntimeError as e:
+        return "error", {"error": str(e)}
+    fn = (msg.get("tool_calls") or [{}])[0].get("function", {})
+    try:
+        return fn.get("name", "none"), json.loads(fn.get("arguments") or "{}")
+    except ValueError:
+        return fn.get("name", "none"), {}
 
 
 def main():
