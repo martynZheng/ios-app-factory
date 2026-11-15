@@ -130,6 +130,7 @@ final class VoiceAnalyzer: ObservableObject {
             let result = await Task.detached(priority: .utility) { Self.measure(url: url) }.value
             self.apply(result, segment: seg, lines: lines)
             self.busy = false
+            await Signals.shared.scan()
             self.kick()
         }
     }

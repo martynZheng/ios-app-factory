@@ -168,7 +168,7 @@ final class ContextSensor: NSObject, ObservableObject, CLLocationManagerDelegate
             if depart == nil {
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 8_000_000_000)   // 等地名解析出来
-                    await Proactive.shared.consider(reason: "刚到一个新地点")
+                    await Proactive.shared.consider(reason: "刚到一个新地点", kind: "place")
                 }
             }
         }

@@ -57,6 +57,7 @@ struct EchoApp: App {
                     coordinator.updateRecent()
                     Task {
                         MemoryFS.shared.syncRaw()
+                        await Signals.shared.scan()
                         await Proactive.shared.brief()
                         // 晚上 9 点后把今天画成一页漫画；昨天没画的补上
                         await StoryStore.shared.makeIfDue()

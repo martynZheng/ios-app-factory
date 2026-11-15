@@ -149,8 +149,15 @@ final class PhoneRelay: NSObject, ObservableObject {
         return Date().timeIntervalSince(last) < Self.silence
     }
 
+    private var lastScan = Date.distantPast
+
     private func evaluate() {
         guard mode != .off else { return }
+        // 接力开着时 App 一直活在后台：顺便每 3 分钟看一眼有没有该唤醒的事（长途开车也靠这里发现）
+        if Date().timeIntervalSince(lastScan) > 180 {
+            lastScan = Date()
+            Task { await Signals.shared.scan() }
+        }
         if watchAlive {
             if mode == .recording {
                 closeSegment()

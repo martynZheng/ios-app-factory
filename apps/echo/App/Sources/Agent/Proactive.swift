@@ -22,6 +22,7 @@ final class Proactive {
             Task { @MainActor in
                 Proactive.scheduleRefresh()
                 let work = Task { @MainActor in
+                    await Signals.shared.scan()
                     await Proactive.shared.consider(reason: "系统给了后台时间")
                     await Proactive.shared.brief()
                 }
@@ -63,27 +64,37 @@ final class Proactive {
         try? BGTaskScheduler.shared.submit(request)
     }
 
-    /// 节制：安静时段不打扰，两次之间至少隔 50 分钟，一天最多 6 条。
-    private func allowed() -> Bool {
+    /// 每类唤醒各自的冷却（分钟）：你说“提醒我”几乎立刻办；关心你的状态不要太频繁。
+    static let cooldown: [String: Double] = ["request": 2, "commitment": 20, "care": 75, "place": 40, "general": 50]
+
+    /// 节制：安静时段不打扰，同类唤醒有冷却，一天最多推 8 条（你要求的提醒不占名额）。
+    private func allowed(kind: String) -> Bool {
         let d = UserDefaults.standard
         guard Self.enabled, Cloud.ready, !Store.isDemo else { return false }
         let hour = Calendar.current.component(.hour, from: Date())
-        if hour < 8 || hour >= 23 { return false }
-        if Date().timeIntervalSince1970 - d.double(forKey: "proactiveLastRun") < 50 * 60 { return false }
+        if kind != "request" && (hour < 8 || hour >= 23) { return false }
+        let last = d.double(forKey: "proactiveLastRun-" + kind)
+        if Date().timeIntervalSince1970 - last < (Self.cooldown[kind] ?? 50) * 60 { return false }
         let today = Store.dayKey(Date())
         if d.string(forKey: "proactiveDay") != today {
             d.set(today, forKey: "proactiveDay")
             d.set(0, forKey: "proactiveCount")
         }
-        return d.integer(forKey: "proactiveCount") < 6
+        return kind == "request" || d.integer(forKey: "proactiveCount") < 8
     }
 
-    func consider(reason: String) async {
-        guard !running, allowed() else { return }
+    /// kind：request（我说了提醒我）/ commitment（答应了别人）/ care（抱怨、累、长途）/ place / general。
+    /// evidence：本机检测到的原话和情境，直接交给智能体，不用它自己大海捞针。
+    func consider(reason: String, kind: String = "general", evidence: [String] = []) async {
+        // 正在跑一次的时候来了更要紧的（你要求的提醒），等它跑完再来
+        if running && kind == "request" {
+            for _ in 0..<30 where running { try? await Task.sleep(nanoseconds: 2_000_000_000) }
+        }
+        guard !running, allowed(kind: kind) else { return }
         running = true
         defer { running = false }
         let d = UserDefaults.standard
-        d.set(Date().timeIntervalSince1970, forKey: "proactiveLastRun")
+        d.set(Date().timeIntervalSince1970, forKey: "proactiveLastRun-" + kind)
         do {
             let assistant = Assistant.shared
             var out: (String, String)?
@@ -95,6 +106,20 @@ final class Proactive {
                 out = (String((args["title"] as? String ?? "").prefix(20)), String((args["body"] as? String ?? "").prefix(90)))
                 return ToolResult(content: "已发出。", terminate: true)
             })
+            var later: (Date, String, String)?
+            tools.append(AgentTool(name: "notify_later", description: "在指定时间发一条通知给我（我说“几点提醒我…”时用）。time 用 HH:mm（今天）或 yyyy-MM-dd HH:mm。",
+                                   parameters: ["type": "object", "properties": ["time": str, "title": str, "body": str], "required": ["time", "title", "body"]]) { args in
+                let raw = (args["time"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+                let f = DateFormatter()
+                f.locale = Locale(identifier: "en_US_POSIX")
+                f.dateFormat = "yyyy-MM-dd HH:mm"
+                let full = raw.count > 5 ? raw : Store.dayKey(Date()) + " " + raw
+                guard let date = f.date(from: full), date > Date() else {
+                    return ToolResult(content: "时间看不懂或已经过了：\(raw)。用 HH:mm 或 yyyy-MM-dd HH:mm，或者现在就用 notify。", terminate: false)
+                }
+                later = (date, String((args["title"] as? String ?? "").prefix(20)), String((args["body"] as? String ?? "").prefix(90)))
+                return ToolResult(content: "已定好。", terminate: true)
+            })
             tools.append(AgentTool(name: "stay_quiet", description: "现在没有值得提醒的事。",
                                    parameters: ["type": "object", "properties": [String: Any]()]) { _ in
                 ToolResult(content: "好。", terminate: true)
@@ -103,7 +128,14 @@ final class Proactive {
             let sent = ChatStore.shared.messages.filter { $0.proactive && Calendar.current.isDateInToday($0.time) }.map { "- \($0.text)" }
             let already = sent.isEmpty ? "今天还没有提醒过我。" : "今天已经提醒过：\n" + sent.joined(separator: "\n")
             _ = try await Brain.run(system: system, tools: tools, thinking: false,
-                                    prompt: "你被唤醒了（原因：\(reason)）。\(already)\n看看现在有没有值得提醒我的事。", maxTurns: 6)
+                                    prompt: Self.wakePrompt(reason: reason, evidence: evidence, already: already), maxTurns: 6)
+            if let (date, title, body) = later, !title.isEmpty, await Pusher.schedule(at: date, title: title, body: body) {
+                let hm = DateFormatter()
+                hm.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm" : "M月d日 HH:mm"
+                var message = ChatMessage(role: .assistant, text: "好，\(hm.string(from: date)) 提醒你：\(title)\(body.isEmpty ? "" : "——" + body)")
+                message.proactive = true
+                ChatStore.shared.append(message)
+            }
             if let (title, body) = out, !title.isEmpty {
                 d.set(d.integer(forKey: "proactiveCount") + 1, forKey: "proactiveCount")
                 _ = await Pusher.now(title: title, body: body)
@@ -114,6 +146,15 @@ final class Proactive {
         } catch {
             // 主动检查失败不打扰你，下次再试
         }
+    }
+
+    static func wakePrompt(reason: String, evidence: [String], already: String) -> String {
+        var text = "你被唤醒了（原因：\(reason)）。"
+        if !evidence.isEmpty {
+            text += "\n本机刚听到 / 看到的：\n" + evidence.map { "- " + $0 }.joined(separator: "\n")
+        }
+        text += "\n\(already)\n看看现在有没有值得跟我说的事。"
+        return text
     }
 
     // MARK: 资讯流
